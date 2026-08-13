@@ -3,6 +3,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAStream.h>
 
 
 __global__ void square_kernel(float *out, const float *inp, int n) { 
@@ -11,6 +12,7 @@ __global__ void square_kernel(float *out, const float *inp, int n) {
 } 
 
 void launch_square_kernel(float* out, const float* inp, int n, int grid_size, int block_size) {
-    square_kernel<<<grid_size, block_size>>>(out, inp, n);
+    auto stream = c10::cuda::getCurrentCUDAStream();
+    square_kernel<<<grid_size, block_size, 0, stream>>>(out, inp, n);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

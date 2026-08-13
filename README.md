@@ -32,10 +32,11 @@ conda install cuda -c nvidia/label/cuda-12.4.0  # choose the desired CUDA versio
 conda install pytorch pytorch-cuda=12.4 -c pytorch -c nvidia/label/cuda-12.4.0  # install Pytorch using the previously mentioned CUDA version
 ```
 
-Finally, install the remaining dependencies:
+Finally, install the remaining dependencies and this extension in editable mode:
 
 ```shell
 pip install -r requirements.txt
+pip install -e .
 ```
 
 ## 🔥 How to run
@@ -45,10 +46,10 @@ This repo contains two sample CUDA kernels that you can use as a starting point:
 The first step is to compile the kernels, which is done by running `setup.py`.
 
 ```shell
-python setup.py install
+pip install -e .
 ```
 
-This will automatically compile the source files found in `csrc`. Note that every time you change something in `csrc`, you need to recompile using the above command. For faster compilation, specify the compute capability of your GPU by setting the `COMPUTE_CAPABILITY` variable in `setup.py`.
+This automatically compiles the source files found in `csrc`. Re-run the command after changing CUDA sources. For faster builds, set `TORCH_CUDA_ARCH_LIST` (for example `8.0`) or `CUDA_COMPUTE_CAPABILITY=80`.
 
 Once you've compiled, you can use the provided scripts to:
 
@@ -61,7 +62,7 @@ Once you've compiled, you can use the provided scripts to:
 2. Benchmark your kernels:
 
     ```shell
-    python benchmark.py
+    python benchmark.py --op matmul --size 1000 --warmup 10 --iters 1000
     ```
 
 These two commands should work out of the box for the two kernels mentioned above.
@@ -73,10 +74,17 @@ That's it! Now, you can start hacking away and create your own CUDA kernels.
 Once you start writing more serious kernels, you probably want to do more precise benchmarking.  The `benchmark.py` script is a simple script for timing your kernels, but it is not as precise as using a profiler. If you want to get detailed information about the performance bottlenecks of your kernels, consider using the `ncu` profiler. For example:
 
 ```shell
-ncu -k square_kernel python benchmark.py -i 1
+ncu --kernel-name square_kernel --launch-skip 10 --launch-count 1 python benchmark.py --op square --iters 1 --warmup 10
 ```
 
-The `-k` flag will make sure that only the `square_kernel` function is being profiled.
+For timeline-level analysis:
+
+```shell
+nsys profile --trace=cuda,nvtx,osrt -o profile python benchmark.py --iters 100
+```
+
+`--kernel-name` filters the report to the selected kernel; `--launch-skip` avoids
+collecting the warmup launches.
 
 Note: this will not work on most cloud GPU instances out of the box. See the [running ncu profiler on a cloud GPU instance](#running-ncu-profiler-on-a-cloud-gpu-instance) section below to fix this.
     

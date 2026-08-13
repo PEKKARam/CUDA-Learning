@@ -2,7 +2,8 @@ import torch
 import pytest
 
 # Note: We need to import the CUDA kernels *after* importing torch
-import my_cuda_kernels
+my_cuda_kernels = pytest.importorskip("my_cuda_kernels") if torch.cuda.is_available() else None
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GPU is required")
 
 
 ABS_TOL = 1e-4

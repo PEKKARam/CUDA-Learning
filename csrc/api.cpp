@@ -11,6 +11,7 @@ It registers the functions with Pybind11, allowing them to be called from Python
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
+#define CHECK_FLOAT32(x) TORCH_CHECK(x.scalar_type() == torch::kFloat32, #x " must be float32")
 
 inline unsigned int cdiv(unsigned int a, unsigned int b) { return (a + b - 1) / b; }
 
@@ -23,9 +24,11 @@ void launch_square_kernel(float* out, const float* inp, int n, int grid_size, in
 torch::Tensor square(const torch::Tensor& inp) {
     CHECK_INPUT(inp)  // check for correct device and contiguous data
     TORCH_CHECK(inp.dim() == 1, "Expected input tensor to have 1 dimension, but has ", inp.dim());
+    CHECK_FLOAT32(inp);
 
     int n = inp.size(0);
     auto out = torch::zeros({n}, inp.options());
+    if (n == 0) return out;
 
     int block_size = 256;
     int grid_size = cdiv(n, block_size);
@@ -43,11 +46,15 @@ void launch_matmul_kernel(float* out, const float* A, const float* B, int h, int
 
 torch::Tensor matmul(const torch::Tensor& A, const torch::Tensor& B) {
     CHECK_INPUT(A); CHECK_INPUT(B);
+    CHECK_FLOAT32(A); CHECK_FLOAT32(B);
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "matmul expects two 2D tensors");
+    TORCH_CHECK(A.device() == B.device(), "A and B must be on the same CUDA device");
     int h = A.size(0);
     int w = B.size(1);
     int k = A.size(1);
     TORCH_CHECK(k==B.size(0), "Size mismatch!");
     auto out = torch::zeros({h, w}, A.options());
+    if (out.numel() == 0) return out;
 
     dim3 block_size(16, 16);
     dim3 grid_size(cdiv(w, block_size.x), cdiv(h, block_size.y));

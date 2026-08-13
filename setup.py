@@ -1,6 +1,5 @@
 """Adapted from https://github.com/Dao-AILab/flash-attention/blob/main/setup.py"""
 
-import warnings
 import os
 from pathlib import Path
 from packaging.version import parse
@@ -17,6 +16,12 @@ from torch.utils.cpp_extension import (
 
 PACKAGE_NAME = "cuda_template"  # name of the Python package
 PACKAGE_IMPORT_NAME = "my_cuda_kernels"  # the name that you will import in Python
+
+# PyTorch cannot infer architectures when no GPU is visible (common in CI and
+# container builds). Keep this overrideable while avoiding an internal empty-list
+# failure in torch.utils.cpp_extension.
+if not os.getenv("TORCH_CUDA_ARCH_LIST") and not torch.cuda.is_available():
+    os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0"
 
 # Select your GPUs compute capability for faster compilation
 COMPUTE_CAPABILITY = None  
@@ -48,12 +53,21 @@ if CUDA_HOME is not None:
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
     print(f"CUDA version = {bare_metal_version}")
 else:
-    warnings.warn("CUDA_HOME is not set.")
+    raise RuntimeError(
+        "CUDA_HOME is not set. Install the CUDA toolkit or set CUDA_HOME "
+        "before building this project."
+    )
     
 cc_flag = []
-if COMPUTE_CAPABILITY is not None:
+# An explicit value is useful on build machines without an attached GPU.
+# Prefer TORCH_CUDA_ARCH_LIST when supplied by the PyTorch build tooling.
+compute_capability = os.getenv("CUDA_COMPUTE_CAPABILITY", COMPUTE_CAPABILITY)
+if compute_capability is not None:
+    compute_capability = str(compute_capability).replace(".", "")
+    if not compute_capability.isdigit():
+        raise ValueError("CUDA_COMPUTE_CAPABILITY must look like 80 or 8.0")
     cc_flag.append("-gencode")
-    cc_flag.append(f"arch=compute_{COMPUTE_CAPABILITY},code=sm_{COMPUTE_CAPABILITY}")
+    cc_flag.append(f"arch=compute_{compute_capability},code=sm_{compute_capability}")
 
 suffixes = [".cpp", ".cu"]
 sources = [p for p in Path("csrc").rglob("*") if p.suffix in suffixes]
@@ -76,18 +90,17 @@ class NinjaBuildExtension(BuildExtension):
     def __init__(self, *args, **kwargs) -> None:
         # do not override env MAX_JOBS if already exists
         if not os.environ.get("MAX_JOBS"):
-            import psutil
-
             # calculate the maximum allowed NUM_JOBS based on cores
-            max_num_jobs_cores = max(1, os.cpu_count() // 2)
-
-            # calculate the maximum allowed NUM_JOBS based on free memory
-            free_memory_gb = psutil.virtual_memory().available / (1024 ** 3)  # free memory in GB
-            max_num_jobs_memory = int(free_memory_gb / 9)  # each JOB peak memory cost is ~8-9GB when threads = 4
-
-            # pick lower value of jobs based on cores vs memory metric to minimize oom and swap usage during compilation
-            max_jobs = max(1, min(max_num_jobs_cores, max_num_jobs_memory))
-            os.environ["MAX_JOBS"] = str(max_jobs)
+            max_num_jobs_cores = max(1, (os.cpu_count() or 2) // 2)
+            # Keep builds usable in minimal environments where psutil is absent.
+            try:
+                import psutil
+                free_memory_gb = psutil.virtual_memory().available / (1024 ** 3)
+                max_num_jobs_memory = max(1, int(free_memory_gb / 9))
+                max_jobs = min(max_num_jobs_cores, max_num_jobs_memory)
+            except ImportError:
+                max_jobs = max_num_jobs_cores
+            os.environ["MAX_JOBS"] = str(max(1, max_jobs))
 
         super().__init__(*args, **kwargs)
 
@@ -107,10 +120,5 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "torch",
-    ],
-    setup_requires=[
-        "packaging",
-        "psutil",
-        "ninja",
     ],
 )

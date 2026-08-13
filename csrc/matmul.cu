@@ -3,6 +3,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAStream.h>
 
 
 __global__ void matmul_kernel(float* out, const float* A, const float* B, int h, int w, int k) {
@@ -19,6 +20,7 @@ __global__ void matmul_kernel(float* out, const float* A, const float* B, int h,
 }
 
 void launch_matmul_kernel(float* out, const float* A, const float* B, int h, int w, int k, dim3 grid_size, dim3 block_size) { 
-    matmul_kernel<<<grid_size, block_size>>>(out, A, B, h, w, k);
+    auto stream = c10::cuda::getCurrentCUDAStream();
+    matmul_kernel<<<grid_size, block_size, 0, stream>>>(out, A, B, h, w, k);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
