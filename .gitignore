@@ -162,3 +162,8 @@ cython_debug/
 #.idea/
 
 tags
+
+# NVIDIA Nsight profiler reports
+*.ncu-rep
+*.nsys-rep
+*.qdstrm

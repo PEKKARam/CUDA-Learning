@@ -2,7 +2,7 @@
 
 A clean and simple template for developing CUDA C++ kernels and testing them in Python/PyTorch 🚀🚀.
 
-Tested on Ubuntu 20.04.
+Tested on Ubuntu 24.04.
 
 ## Structure
 
@@ -21,49 +21,112 @@ Tested on Ubuntu 20.04.
     └── test_square.py
 ```
 
-## 💻 Installation
+## 💻 Installation with uv
 
-First, install CUDA and PyTorch. The preferred way to install CUDA is through Conda (see [here](https://x.com/jeremyphoward/status/1697435241152127369)). Also note that you will need an Nvidia GPU to run this.
+This project uses [uv](https://docs.astral.sh/uv/) to manage Python and the
+virtual environment. The local development environment currently uses:
 
-```shell
-conda create -n cuda-kernels  # create a new Conda environment
-conda activate cuda-kernels  # activate the environment
-conda install cuda -c nvidia/label/cuda-12.4.0  # choose the desired CUDA version (here we use 12.4)
-conda install pytorch pytorch-cuda=12.4 -c pytorch -c nvidia/label/cuda-12.4.0  # install Pytorch using the previously mentioned CUDA version
+```text
+uv 0.12.3
+Python 3.14.7
+PyTorch 2.13.0+cu130
+CUDA Toolkit 13.3 (/usr/local/cuda)
 ```
 
-Finally, install the remaining dependencies and this extension in editable mode:
+An Nvidia GPU and a working driver are required to run the kernels. Building
+the extension also requires a CUDA Toolkit containing `nvcc`; Python packages
+installed by uv do not replace the system compiler selected by `CUDA_HOME`.
+
+Create the same local environment from the repository root:
 
 ```shell
-pip install -r requirements.txt
-pip install -e .
+uv python install 3.14
+uv venv --python 3.14
+source .venv/bin/activate
+
+uv pip install "torch==2.13.0"
+uv pip install -r requirements.txt
+TORCH_CUDA_ARCH_LIST=12.0 uv pip install -e . --no-build-isolation
+```
+
+`--no-build-isolation` is required because `setup.py` imports PyTorch while
+building the CUDA extension. The uv environment intentionally does not need a
+standalone `pip` installation; use `uv pip` to manage its packages.
+
+Check that uv, PyTorch and the CUDA compiler resolve to the expected versions:
+
+```shell
+uv --version
+uv run python -c "import torch; print(torch.__version__, torch.version.cuda)"
+echo "${CUDA_HOME:-/usr/local/cuda}"
+"${CUDA_HOME:-/usr/local/cuda}/bin/nvcc" --version
+uv run python -c "import torch; print(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))"
 ```
 
 ## 🔥 How to run
 
 This repo contains two sample CUDA kernels that you can use as a starting point: `csrc/square.cu` and `csrc/matmul.cu`.
 
-The first step is to compile the kernels, which is done by running `setup.py`.
+The first step is to compile the kernels in editable mode:
 
 ```shell
-pip install -e .
+TORCH_CUDA_ARCH_LIST=12.0 uv run python setup.py build_ext --inplace --force
 ```
 
-This automatically compiles the source files found in `csrc`. Re-run the command after changing CUDA sources. For faster builds, set `TORCH_CUDA_ARCH_LIST` (for example `8.0`) or `CUDA_COMPUTE_CAPABILITY=80`.
+This forces all CUDA sources to be rebuilt for the local RTX 5060 Ti (`sm_120`),
+so an older binary compiled for another GPU is not reused. Re-run it after
+changing CUDA sources. On another GPU, replace `12.0` with the value printed by
+`torch.cuda.get_device_capability()` (for example, use `8.0` for an A100).
 
 Once you've compiled, you can use the provided scripts to:
 
 1. Test your kernels:
 
-    ```shell
-    pytest -v -s
-    ```
+```shell
+uv run python -m pytest -v -s
+```
+
+test a single kernel:
+
+```shell
+uv run python -m pytest tests/test_matmul.py -v -s
+```
+
+test a single function specifically:
+
+```shell
+uv run python -m pytest tests/test_square.py::test_square_kernel -v -s
+```
+
+部分算子使用了参数化测试。如果只想运行某个尺寸，可以先查看完整的 pytest case ID：
+
+```shell
+uv run python -m pytest tests/test_matmul.py --collect-only -q
+```
+
+```shell
+tests/test_matmul.py::test_matmul_kernel[2-2-20]
+tests/test_matmul.py::test_matmul_kernel[20-2-2]
+tests/test_matmul.py::test_matmul_kernel[3-7-11]
+tests/test_matmul.py::test_matmul_kernel[1024-1024-1024]
+tests/test_matmul.py::test_matmul_kernel[1000-10-10]
+tests/test_matmul.py::test_matmul_kernel[10-10-1000]
+tests/test_matmul.py::test_matmul_kernel[999-999-999]
+```
+
+然后单独运行一个 case。因为方括号在 shell 中有特殊含义，建议把完整 node ID 用引号包起来：
+
+```shell
+uv run python -m pytest \
+"tests/test_matmul.py::test_matmul_kernel[1024-1024-1024]" \
+-v -s
+```
 
 2. Benchmark your kernels:
 
-    ```shell
-    python benchmark.py --op matmul --size 1000 --warmup 10 --iters 1000
-    ```
+```shell
+uv run python benchmark.py --op matmul --size 1000 --warmup 10 --iters 1000
+```
 
 These two commands should work out of the box for the two kernels mentioned above.
 
@@ -74,19 +137,33 @@ That's it! Now, you can start hacking away and create your own CUDA kernels.
 Once you start writing more serious kernels, you probably want to do more precise benchmarking.  The `benchmark.py` script is a simple script for timing your kernels, but it is not as precise as using a profiler. If you want to get detailed information about the performance bottlenecks of your kernels, consider using the `ncu` profiler. For example:
 
 ```shell
-ncu --kernel-name square_kernel --launch-skip 10 --launch-count 1 python benchmark.py --op square --iters 1 --warmup 10
+sudo /usr/local/cuda/bin/ncu \
+    --kernel-name square_kernel \
+    --launch-skip 10 \
+    --launch-count 1 \
+    "$PWD/.venv/bin/python" benchmark.py \
+    --op square --size 1000000 --warmup 10 --iters 1
 ```
 
 For timeline-level analysis:
 
 ```shell
-nsys profile --trace=cuda,nvtx,osrt -o profile python benchmark.py --iters 100
+/usr/local/cuda/bin/nsys profile \
+    --trace=cuda,nvtx,osrt \
+    --force-overwrite=true \
+    --output=profile \
+    "$PWD/.venv/bin/python" benchmark.py \
+    --op matmul --size 1000 --warmup 10 --iters 100
 ```
 
 `--kernel-name` filters the report to the selected kernel; `--launch-skip` avoids
-collecting the warmup launches.
+collecting the warmup launches. `--force-overwrite=true` allows Nsight Systems
+to replace an existing `profile.nsys-rep` instead of failing because the output
+file already exists.
 
-Note: this will not work on most cloud GPU instances out of the box. See the [running ncu profiler on a cloud GPU instance](#running-ncu-profiler-on-a-cloud-gpu-instance) section below to fix this.
+Nsight Compute needs access to hardware performance counters. On this machine,
+running it without `sudo` produces `ERR_NVGPUCTRPERM`; Nsight Systems does not
+need performance-counter permission for the CUDA timeline above.
     
 
 ## Running ncu profiler on a cloud GPU instance
@@ -100,32 +177,14 @@ $ ncu ./benchmark
 ```
  
 
-To fix this, you can run `ncu` with `sudo`. Note however that when you run `sudo`, your environment variables change, which means that `ncu` may no longer be on the PATH. This can be fixed by specifying the full path to `ncu`. E.g.:
+To fix this, run `ncu` with `sudo`. The command above uses absolute paths for
+both `ncu` and the uv-created Python interpreter, so it does not depend on the
+restricted `sudo` PATH. If an administrator has enabled performance counters
+for normal users, the `sudo` prefix can be removed.
 
 ```bash
-which ncu  # check ncu path
-sudo /opt/conda/envs/cuda-kernels/bin/ncu  # pass ncu path
-```
-
-In my case, ncu is provided through Conda. To make running ncu more convenient, you can directly add your Conda path to the "sudoers" file. Do this as follows:
-
-```shell
-sudo visudo
-```
-
- Add your conda environment's bin directory to the Defaults secure_path line: 
-
-```shell
-Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/path/to/conda/env/bin"
-```
-
-Replace /path/to/conda/env/bin with the actual path to your conda environment's bin directory.
-
-
-You can now run ncu simply by prepending `sudo`:
-
-```shell
-sudo ncu
+/usr/local/cuda/bin/ncu --version
+/usr/local/cuda/bin/nsys --version
 ```
 
 ## TODO

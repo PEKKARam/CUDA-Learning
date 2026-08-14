@@ -21,7 +21,7 @@ PACKAGE_IMPORT_NAME = "my_cuda_kernels"  # the name that you will import in Pyth
 # container builds). Keep this overrideable while avoiding an internal empty-list
 # failure in torch.utils.cpp_extension.
 if not os.getenv("TORCH_CUDA_ARCH_LIST") and not torch.cuda.is_available():
-    os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0"
+    os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0"
 
 # Select your GPUs compute capability for faster compilation
 COMPUTE_CAPABILITY = None  

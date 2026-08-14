@@ -66,10 +66,27 @@ torch::Tensor matmul(const torch::Tensor& A, const torch::Tensor& B) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Add reduce kernel
+// Reduce kernel
 
-template<typename T>
-void launch_sum_reduce_kernel(const T *input, T *output)
+void launch_reduce_no_bankconflict_kernel(const float* input, float* output,
+                                          size_t n, dim3 grid_size,
+                                          dim3 block_size);
+
+torch::Tensor reduce_no_bankconflict(const torch::Tensor& input) {
+    CHECK_INPUT(input);
+    CHECK_FLOAT32(input);
+    TORCH_CHECK(input.dim() == 1, "reduce_no_bankconflict expects a 1D tensor");
+
+    auto output = torch::zeros({}, input.options());
+    if (input.numel() == 0) return output;
+
+    dim3 block_size(256);
+    dim3 grid_size(cdiv(input.numel(), block_size.x));
+    launch_reduce_no_bankconflict_kernel(
+        input.data_ptr<float>(), output.data_ptr<float>(), input.numel(),
+        grid_size, block_size);
+    return output;
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -77,4 +94,6 @@ void launch_sum_reduce_kernel(const T *input, T *output)
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("square", torch::wrap_pybind_function(square), "square");
     m.def("matmul", torch::wrap_pybind_function(matmul), "matmul");
+    m.def("reduce_no_bankconflict", torch::wrap_pybind_function(reduce_no_bankconflict),
+          "sum reduction without shared-memory bank conflicts");
 }
