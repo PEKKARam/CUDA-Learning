@@ -66,6 +66,13 @@ torch::Tensor matmul(const torch::Tensor& A, const torch::Tensor& B) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Add reduce kernel
+
+template<typename T>
+void launch_sum_reduce_kernel(const T *input, T *output)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Register the wrapper functions with Pybind to make them available in Python
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("square", torch::wrap_pybind_function(square), "square");
