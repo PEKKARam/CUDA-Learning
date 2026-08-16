@@ -92,6 +92,12 @@ test a single kernel:
 uv run python -m pytest tests/test_matmul.py -v -s
 ```
 
+test a particular version of the kernel:
+
+```shell
+uv run python -m pytest tests/test_reduce.py -k reduce_unroll_last_warp -v -s
+```
+
 test a single function specifically:
 
 ```shell
@@ -122,7 +128,7 @@ uv run python -m pytest \
 -v -s
 ```
 
-2. Benchmark your kernels:
+1. Benchmark your kernels:
 
 ```shell
 uv run python benchmark.py --op matmul --size 1000 --warmup 10 --iters 1000

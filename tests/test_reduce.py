@@ -10,11 +10,21 @@ ABS_TOL = 1e-4
 REL_TOL = 1e-1
 
 
+@pytest.mark.parametrize(
+    "op_name", ["reduce_no_bankconflict",
+                "reduce_add_during_load",
+                "reduce_add_during_load_v2",
+                "reduce_unroll_last_warp",
+                "reduce_completely_unroll",
+                "reduce_multi_add",
+                "reduce_shuffle",
+                ]
+)
 @pytest.mark.parametrize("size", [1, 255, 256, 1003, 65536])
-def test_reduce_no_bankconflict(size):
+def test_reduce(op_name, size):
     torch.manual_seed(1)
     x = torch.randn(size, device="cuda", dtype=torch.float32)
 
-    out = my_cuda_kernels.reduce_no_bankconflict(x)
+    out = getattr(my_cuda_kernels, op_name)(x)
 
     assert torch.isclose(out, x.sum(), atol=ABS_TOL, rtol=REL_TOL).item()
