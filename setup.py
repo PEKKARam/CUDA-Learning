@@ -74,8 +74,8 @@ if compute_capability is not None:
     cc_flag.append("-gencode")
     cc_flag.append(f"arch=compute_{compute_capability},code=sm_{compute_capability}")
 
-suffixes = [".cpp", ".cu"]
-sources = [p for p in Path("csrc").rglob("*") if p.suffix in suffixes]
+sources = [Path("bindings/pytorch/api.cpp")]
+sources.extend(Path("src").rglob("*.cu"))
 
 print(f"\nFound sources: {[str(p) for p in sources]}\n\n")
 
@@ -100,7 +100,7 @@ ext_modules = [
                 + cc_flag
             ),
         },
-        include_dirs=[],
+        include_dirs=[str(Path("include").resolve())],
     )
 ]
 
@@ -128,7 +128,10 @@ setup(
     packages=find_packages(
         exclude=(
             "build",
-            "csrc",
+            "bindings",
+            "benchmarks",
+            "include",
+            "src",
             "tests",
             "dist",
         )

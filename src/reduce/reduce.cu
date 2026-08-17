@@ -1,9 +1,12 @@
 /* Sum reduction kernel. */
 
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAStream.h>
-#include <cuda.h>
+#include "cuda_learning/kernels.h"
+
 #include <cuda_runtime.h>
+
+#include <stdexcept>
+
+namespace cuda_learning {
 
 /* reduce: no bank conflict version */
 __global__ void reduce_no_bankconflict(const float* d_input, float* d_output,
@@ -296,80 +299,141 @@ __global__ void reduce_shuffle(const float* input, float* output,
 
 void launch_reduce_no_bankconflict_kernel(const float* input, float* output,
                                           const size_t N, dim3 grid_size,
-                                          dim3 block_size) {
-    auto stream = c10::cuda::getCurrentCUDAStream();
+                                          dim3 block_size,
+                                          cudaStream_t stream) {
     const size_t shared_memory = block_size.x * sizeof(float);
     reduce_no_bankconflict<<<grid_size, block_size, shared_memory, stream>>>(
         input, output, N);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void launch_reduce_add_during_load_kernel(const float* input, float* output,
                                           const size_t N, dim3 grid_size,
-                                          dim3 block_size) {
-    auto stream = c10::cuda::getCurrentCUDAStream();
+                                          dim3 block_size,
+                                          cudaStream_t stream) {
     const size_t shared_memory = block_size.x * sizeof(float);
     reduce_add_during_load<<<grid_size, block_size, shared_memory, stream>>>(
         input, output, N);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void launch_reduce_add_during_load_v2_kernel(const float* input, float* output,
                                              const size_t N, dim3 grid_size,
-                                             dim3 block_size) {
-    auto stream = c10::cuda::getCurrentCUDAStream();
+                                             dim3 block_size,
+                                             cudaStream_t stream) {
     block_size.x /= 2;
     const size_t shared_memory = block_size.x * sizeof(float);
     reduce_add_during_load_v2<<<grid_size, block_size, shared_memory, stream>>>(
         input, output, N);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void launch_reduce_unroll_last_warp_kernel(const float* input, float* output,
                                            const size_t N, dim3 grid_size,
-                                           dim3 block_size) {
-    auto stream = c10::cuda::getCurrentCUDAStream();
+                                           dim3 block_size,
+                                           cudaStream_t stream) {
     block_size.x /= 2;
     const size_t shared_memory = block_size.x * sizeof(float);
     reduce_unroll_last_warp<<<grid_size, block_size, shared_memory, stream>>>(
         input, output, N);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void launch_reduce_completely_unroll_kernel(const float* input, float* output,
                                             const size_t N, dim3 grid_size,
-                                            dim3 block_size) {
-    auto stream = c10::cuda::getCurrentCUDAStream();
+                                            dim3 block_size,
+                                            cudaStream_t stream) {
     const size_t shared_memory = block_size.x * sizeof(float);
     reduce_completely_unroll<<<grid_size, block_size, shared_memory, stream>>>(
         input, output, N);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void launch_reduce_multi_add_kernel(const float* input, float* output,
-                                    const size_t N) {
+                                    const size_t N, cudaStream_t stream) {
     constexpr size_t NUM_PER_THREAD = 4;
     constexpr size_t THREAD_PER_BLOCK = 256;
     constexpr size_t NUM_PER_BLOCK = NUM_PER_THREAD * THREAD_PER_BLOCK;
     const dim3 block_size(THREAD_PER_BLOCK);
     const dim3 grid_size((N + NUM_PER_BLOCK - 1) / NUM_PER_BLOCK);
-    auto stream = c10::cuda::getCurrentCUDAStream();
     constexpr size_t shared_memory = THREAD_PER_BLOCK * sizeof(float);
     reduce_multi_add<NUM_PER_THREAD, THREAD_PER_BLOCK>
         <<<grid_size, block_size, shared_memory, stream>>>(input, output, N);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void launch_reduce_shuffle_kernel(const float* input, float* output,
-                                  const size_t N) {
+                                  const size_t N, cudaStream_t stream) {
     constexpr size_t NUM_PER_THREAD = 4;
     constexpr size_t THREAD_PER_BLOCK = 256;
     constexpr size_t NUM_PER_BLOCK = NUM_PER_THREAD * THREAD_PER_BLOCK;
     const dim3 block_size(THREAD_PER_BLOCK);
     const dim3 grid_size((N + NUM_PER_BLOCK - 1) / NUM_PER_BLOCK);
-    auto stream = c10::cuda::getCurrentCUDAStream();
 
     reduce_shuffle<NUM_PER_THREAD, THREAD_PER_BLOCK>
         <<<grid_size, block_size, 0, stream>>>(input, output, N);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+void launch_reduce(ReduceImplementation implementation, const float* input,
+                   float* output, std::size_t n, cudaStream_t stream) {
+    if (n == 0) {
+        return;
+    }
+
+    constexpr unsigned int threads = 256;
+    dim3 block_size(threads);
+    dim3 grid_size;
+
+    switch (implementation) {
+        case ReduceImplementation::NoBankConflict:
+            grid_size.x = static_cast<unsigned int>((n + threads - 1) / threads);
+            launch_reduce_no_bankconflict_kernel(input, output, n, grid_size,
+                                                 block_size, stream);
+            return;
+        case ReduceImplementation::AddDuringLoad:
+            grid_size.x =
+                static_cast<unsigned int>((n + 2 * threads - 1) / (2 * threads));
+            launch_reduce_add_during_load_kernel(input, output, n, grid_size,
+                                                 block_size, stream);
+            return;
+        case ReduceImplementation::AddDuringLoadV2:
+            grid_size.x = static_cast<unsigned int>((n + threads - 1) / threads);
+            launch_reduce_add_during_load_v2_kernel(input, output, n, grid_size,
+                                                    block_size, stream);
+            return;
+        case ReduceImplementation::UnrollLastWarp:
+            grid_size.x = static_cast<unsigned int>((n + threads - 1) / threads);
+            launch_reduce_unroll_last_warp_kernel(input, output, n, grid_size,
+                                                  block_size, stream);
+            return;
+        case ReduceImplementation::CompletelyUnroll:
+            grid_size.x =
+                static_cast<unsigned int>((n + 2 * threads - 1) / (2 * threads));
+            launch_reduce_completely_unroll_kernel(input, output, n, grid_size,
+                                                   block_size, stream);
+            return;
+        case ReduceImplementation::MultiAdd:
+            launch_reduce_multi_add_kernel(input, output, n, stream);
+            return;
+        case ReduceImplementation::Shuffle:
+            launch_reduce_shuffle_kernel(input, output, n, stream);
+            return;
+    }
+    throw std::invalid_argument("unknown reduction implementation");
+}
+
+const char* implementation_name(ReduceImplementation implementation) {
+    switch (implementation) {
+        case ReduceImplementation::NoBankConflict:
+            return "no_bankconflict";
+        case ReduceImplementation::AddDuringLoad:
+            return "add_during_load";
+        case ReduceImplementation::AddDuringLoadV2:
+            return "add_during_load_v2";
+        case ReduceImplementation::UnrollLastWarp:
+            return "unroll_last_warp";
+        case ReduceImplementation::CompletelyUnroll:
+            return "completely_unroll";
+        case ReduceImplementation::MultiAdd:
+            return "multi_add";
+        case ReduceImplementation::Shuffle:
+            return "shuffle";
+    }
+    return "unknown";
+}
+
+}  // namespace cuda_learning

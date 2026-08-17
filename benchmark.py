@@ -18,6 +18,8 @@ REDUCE_OPS = (
     "reduce_shuffle",
 )
 
+SGEMM_OPS = ("matmul", "sgemm_naive", "sgemm_baseline")
+
 
 def benchmark(f, iters, warmup, profile_range, *args):
     """
@@ -66,7 +68,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Benchmark CUDA kernels.')
     parser.add_argument('-i', '--iters', type=int, default=1000, help='Measured iterations')
     parser.add_argument('-w', '--warmup', type=int, default=10, help='Warmup iterations')
-    parser.add_argument('--op', choices=('matmul', 'square', *REDUCE_OPS), default='matmul')
+    parser.add_argument(
+        '--op', choices=('square', *SGEMM_OPS, *REDUCE_OPS), default='matmul'
+    )
     parser.add_argument('--size', type=int, default=1000, help='Matrix/vector size')
     parser.add_argument(
         '--profile-range',
@@ -87,11 +91,18 @@ if __name__ == "__main__":
         inp = torch.randn(n, device='cuda')
         print(f"\nBenchmarking square kernel on input size ({n},)")
         benchmark(my_cuda_kernels.square, args.iters, args.warmup, args.profile_range, inp)
-    elif args.op == 'matmul':
+    elif args.op in SGEMM_OPS:
         m1 = torch.randn(n, n, device="cuda")
         m2 = torch.randn(n, n, device="cuda")
-        print(f"\nBenchmarking matmul kernel on input size ({n}, {n})")
-        benchmark(my_cuda_kernels.matmul, args.iters, args.warmup, args.profile_range, m1, m2)
+        print(f"\nBenchmarking {args.op} kernel on input size ({n}, {n})")
+        benchmark(
+            getattr(my_cuda_kernels, args.op),
+            args.iters,
+            args.warmup,
+            args.profile_range,
+            m1,
+            m2,
+        )
     else:
         inp = torch.randn(n, device='cuda')
         print(f"\nBenchmarking {args.op} on input size ({n},)")

@@ -165,7 +165,8 @@ cython_debug/
 
 tags
 
-# NVIDIA Nsight profiler reports
+# NVIDIA profiler reports
 *.ncu-rep
 *.nsys-rep
 *.qdstrm
+reports/

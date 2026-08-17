@@ -2,14 +2,29 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "CUDA: Debug square kernel",
+            "name": "CUDA: Debug standalone SGEMM",
+            "type": "cuda-gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/cmake-debug/benchmark_sgemm",
+            "args": [
+                "--impl", "naive",
+                "--m", "128",
+                "--n", "128",
+                "--k", "128",
+                "--warmup", "0",
+                "--iters", "1"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "CUDA: Debug PyTorch SGEMM",
             "type": "cuda-gdb",
             "request": "launch",
             "program": "${workspaceFolder}/.venv/bin/python",
             "args": [
                 "${workspaceFolder}/benchmark.py",
-                "--op", "square",
-                "--size", "1024",
+                "--op", "sgemm_naive",
+                "--size", "128",
                 "--warmup", "0",
                 "--iters", "1"
             ],
