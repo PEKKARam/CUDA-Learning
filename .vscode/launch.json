@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CUDA: Debug square kernel",
+            "type": "cuda-gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/.venv/bin/python",
+            "args": [
+                "${workspaceFolder}/benchmark.py",
+                "--op", "square",
+                "--size", "1024",
+                "--warmup", "0",
+                "--iters", "1"
+            ],
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "CUDA_LAUNCH_BLOCKING",
+                    "value": "1"
+                }
+            ]
+        }
+    ]
+}

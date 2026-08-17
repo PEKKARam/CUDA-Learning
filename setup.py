@@ -17,6 +17,10 @@ from torch.utils.cpp_extension import (
 PACKAGE_NAME = "cuda_template"  # name of the Python package
 PACKAGE_IMPORT_NAME = "my_cuda_kernels"  # the name that you will import in Python
 
+CUDA_BUILD_MODE = os.getenv("CUDA_BUILD_MODE", "release").lower()
+if CUDA_BUILD_MODE not in {"release", "profile", "debug"}:
+    raise ValueError("CUDA_BUILD_MODE must be one of: release, profile, debug")
+
 # PyTorch cannot infer architectures when no GPU is visible (common in CI and
 # container builds). Keep this overrideable while avoiding an internal empty-list
 # failure in torch.utils.cpp_extension.
@@ -48,6 +52,7 @@ def append_nvcc_threads(nvcc_extra_args):
 
 
 print("\nTorch version = {}".format(torch.__version__))
+print(f"CUDA build mode = {CUDA_BUILD_MODE}")
 
 if CUDA_HOME is not None:
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
@@ -79,8 +84,21 @@ ext_modules = [
         name=PACKAGE_IMPORT_NAME,
         sources=sources,
         extra_compile_args={
-            "cxx": ["-O2"],
-            "nvcc": append_nvcc_threads(["-O2"] + cc_flag),
+            "cxx": (
+                ["-O0", "-g"]
+                if CUDA_BUILD_MODE == "debug"
+                else ["-O2"]
+            ),
+            "nvcc": append_nvcc_threads(
+                (
+                    ["-O0", "-g", "-G"]
+                    if CUDA_BUILD_MODE == "debug"
+                    else ["-O2", "--generate-line-info"]
+                    if CUDA_BUILD_MODE == "profile"
+                    else ["-O2"]
+                )
+                + cc_flag
+            ),
         },
         include_dirs=[],
     )

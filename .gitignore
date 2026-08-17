@@ -133,7 +133,8 @@ venv.bak/
 # Spyder project settings
 .spyderproject
 .spyproject
-.vscode/
+.vscode/*
+!.vscode/launch.json
 
 # Rope project settings
 .ropeproject
