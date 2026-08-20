@@ -15,9 +15,9 @@
 
 namespace cuda_learning {
 
-template <typename T>
-class DeviceBuffer {
-   public:
+// device buffer
+template <typename T> class DeviceBuffer {
+public:
     explicit DeviceBuffer(std::size_t count) : count_(count) {
         if (count_ != 0) {
             CUDA_CHECK(cudaMalloc(&data_, count_ * sizeof(T)));
@@ -30,22 +30,22 @@ class DeviceBuffer {
         }
     }
 
-    DeviceBuffer(const DeviceBuffer&) = delete;
-    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+    DeviceBuffer(const DeviceBuffer &) = delete;
+    DeviceBuffer &operator=(const DeviceBuffer &) = delete;
 
-    T* data() { return data_; }
-    const T* data() const { return data_; }
+    T *data() { return data_; }
+    const T *data() const { return data_; }
     std::size_t size() const { return count_; }
 
-    void copy_from(const std::vector<T>& host) {
-        CUDA_CHECK(cudaMemcpy(data_, host.data(), count_ * sizeof(T),
-                              cudaMemcpyHostToDevice));
+    // host to device
+    void copy_from(const std::vector<T> &host) {
+        CUDA_CHECK(cudaMemcpy(data_, host.data(), count_ * sizeof(T), cudaMemcpyHostToDevice));
     }
 
+    // device to host
     std::vector<T> copy_to_host() const {
         std::vector<T> host(count_);
-        CUDA_CHECK(cudaMemcpy(host.data(), data_, count_ * sizeof(T),
-                              cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(host.data(), data_, count_ * sizeof(T), cudaMemcpyDeviceToHost));
         return host;
     }
 
@@ -55,29 +55,28 @@ class DeviceBuffer {
         }
     }
 
-   private:
-    T* data_ = nullptr;
+private:
+    T *data_ = nullptr;
     std::size_t count_ = 0;
 };
 
-inline std::vector<float> random_floats(std::size_t count,
-                                        unsigned int seed = 1) {
+inline std::vector<float> random_floats(std::size_t count, unsigned int seed = 1) {
+    // 随机数生成器
     std::mt19937 generator(seed);
+    // 随机数生成范围器，限制随机数的生成范围
     std::uniform_real_distribution<float> distribution(-1.0F, 1.0F);
+
     std::vector<float> values(count);
-    for (float& value : values) {
-        value = distribution(generator);
-    }
+    for (float &value : values) { value = distribution(generator); }
     return values;
 }
 
-inline bool close(float actual, float expected, float atol = 1e-4F,
-                  float rtol = 1e-3F) {
+// 误差对比函数, atol: 绝对误差，rtol: 相对误差
+inline bool close(float actual, float expected, float atol = 1e-4F, float rtol = 1e-3F) {
     return std::abs(actual - expected) <= atol + rtol * std::abs(expected);
 }
 
-inline bool check_vectors(const std::vector<float>& actual,
-                          const std::vector<float>& expected,
+inline bool check_vectors(const std::vector<float> &actual, const std::vector<float> &expected,
                           float atol = 1e-4F, float rtol = 1e-3F) {
     if (actual.size() != expected.size()) {
         return false;
@@ -93,11 +92,9 @@ inline bool check_vectors(const std::vector<float>& actual,
 }
 
 template <typename Launch>
-float benchmark_ms(const std::string& label, int warmup, int iterations,
-                   bool profile_range, Launch&& launch) {
-    for (int iteration = 0; iteration < warmup; ++iteration) {
-        launch();
-    }
+float benchmark_ms(const std::string &label, int warmup, int iterations, bool profile_range,
+                   Launch &&launch) {
+    for (int iteration = 0; iteration < warmup; ++iteration) { launch(); }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -111,9 +108,7 @@ float benchmark_ms(const std::string& label, int warmup, int iterations,
     }
     nvtxRangePushA(label.c_str());
     CUDA_CHECK(cudaEventRecord(start));
-    for (int iteration = 0; iteration < iterations; ++iteration) {
-        launch();
-    }
+    for (int iteration = 0; iteration < iterations; ++iteration) { launch(); }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
     nvtxRangePop();
@@ -129,8 +124,8 @@ float benchmark_ms(const std::string& label, int warmup, int iterations,
     return elapsed_ms / static_cast<float>(iterations);
 }
 
-inline int int_argument(int argc, char** argv, const std::string& name,
-                        int default_value) {
+// 解析命令行参数
+inline int int_argument(int argc, char **argv, const std::string &name, int default_value) {
     for (int index = 1; index + 1 < argc; ++index) {
         if (argv[index] == name) {
             return std::stoi(argv[index + 1]);
@@ -139,8 +134,7 @@ inline int int_argument(int argc, char** argv, const std::string& name,
     return default_value;
 }
 
-inline std::string string_argument(int argc, char** argv,
-                                   const std::string& name,
+inline std::string string_argument(int argc, char **argv, const std::string &name,
                                    std::string default_value) {
     for (int index = 1; index + 1 < argc; ++index) {
         if (argv[index] == name) {
@@ -150,7 +144,7 @@ inline std::string string_argument(int argc, char** argv,
     return default_value;
 }
 
-inline bool has_flag(int argc, char** argv, const std::string& flag) {
+inline bool has_flag(int argc, char **argv, const std::string &flag) {
     for (int index = 1; index < argc; ++index) {
         if (argv[index] == flag) {
             return true;
@@ -159,4 +153,4 @@ inline bool has_flag(int argc, char** argv, const std::string& flag) {
     return false;
 }
 
-}  // namespace cuda_learning
+} // namespace cuda_learning

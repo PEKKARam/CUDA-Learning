@@ -81,9 +81,9 @@ int main(int argc, char** argv) {
                         device_b.data(), m, n, k);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
-    if (!cuda_learning::check_vectors(device_naive.copy_to_host(),
-                                      device_cublas.copy_to_host(), 1e-2F,
-                                      1e-3F)) {
+    const auto reference = device_cublas.copy_to_host();
+    if (!cuda_learning::check_vectors(device_naive.copy_to_host(), reference,
+                                      1e-2F, 1e-3F)) {
         std::cerr << "naive SGEMM does not match cuBLAS" << std::endl;
         CUBLAS_CHECK(cublasDestroy(handle));
         return EXIT_FAILURE;
@@ -102,6 +102,21 @@ int main(int argc, char** argv) {
             continue;
         }
         const std::string name(selected.name);
+
+        // Validate this implementation outside the timed region. The
+        // benchmark should never report performance for an incorrect kernel.
+        selected.launch(device_naive.data(), device_a.data(), device_b.data(),
+                        m, n, k, nullptr);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        if (!cuda_learning::check_vectors(device_naive.copy_to_host(),
+                                          reference, 1e-2F, 1e-3F)) {
+            std::cerr << "SGEMM " << name << " failed correctness for M=" << m
+                      << ", N=" << n << ", K=" << k << std::endl;
+            CUBLAS_CHECK(cublasDestroy(handle));
+            return EXIT_FAILURE;
+        }
+
         const float milliseconds = cuda_learning::benchmark_ms(
             "sgemm_" + name, warmup, iterations, profile, [&] {
                 selected.launch(device_naive.data(), device_a.data(),
@@ -111,6 +126,20 @@ int main(int argc, char** argv) {
     }
 
     if (implementation == "all" || implementation == "cublas") {
+        CUDA_CHECK(cudaMemset(device_cublas.data(), 0,
+                              static_cast<std::size_t>(m) * n * sizeof(float)));
+        launch_cublas_sgemm(handle, device_cublas.data(), device_a.data(),
+                            device_b.data(), m, n, k);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        if (!cuda_learning::check_vectors(device_cublas.copy_to_host(),
+                                          reference, 1e-2F, 1e-3F)) {
+            std::cerr << "cuBLAS SGEMM failed its reference check for M=" << m
+                      << ", N=" << n << ", K=" << k << std::endl;
+            CUBLAS_CHECK(cublasDestroy(handle));
+            return EXIT_FAILURE;
+        }
+
         const float milliseconds = cuda_learning::benchmark_ms(
             "sgemm_cublas", warmup, iterations, profile, [&] {
                 launch_cublas_sgemm(handle, device_cublas.data(),

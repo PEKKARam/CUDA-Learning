@@ -1,189 +1,196 @@
 # CUDA Learning
 
-这是一个面向 CUDA kernel 学习、源码调试和性能优化的工程。项目采用“共享 CUDA
-核心 + standalone CMake 工具 + 可选 PyTorch binding”的结构：kernel 和 launcher
-只实现一次，既能由纯 CUDA 可执行文件直接测试和 profile，也能作为 PyTorch 自定义
-算子调用。
-
-当前包含：
-
-- square kernel；
-- 多个 sum-reduction 优化版本；
-- row-major naive SGEMM；
-- cuBLAS SGEMM 正确性与性能 baseline；
-- CTest、Python/pytest、CUDA Event benchmark、NVTX 和 CUDA Profiler API；
-- `cuda-gdb`、Nsight Systems、Nsight Compute、Compute Sanitizer 使用入口。
-
-## 架构
+这个项目用于学习 CUDA kernel、SGEMM 优化、cuBLAS 对比、CUDA 调试以及可选的
+PyTorch 自定义算子。CUDA kernel 只实现一次，由 CMake standalone 程序和 PyTorch
+binding 共同复用。
 
 ```text
-.
-├── CMakeLists.txt
-├── include/cuda_learning/
-│   ├── kernels.h              # 与框架无关的 kernel/launcher 公共接口
-│   ├── cuda_check.h           # standalone CUDA 错误检查
-│   └── standalone_utils.h     # 显存、随机输入、校验、CUDA Event/NVTX 计时
-├── src/
-│   ├── square/square.cu
-│   ├── reduce/reduce.cu
-│   └── sgemm/sgemm.cu         # SGEMM kernel 与实现 registry
-├── tests/cpp/                 # 不依赖 PyTorch 的 CTest 正确性测试
-├── benchmarks/                # standalone benchmark/profile 入口
-│   ├── benchmark_square.cu
-│   ├── benchmark_reduce.cu
-│   └── benchmark_sgemm.cu     # 自定义 SGEMM 与 cuBLAS 对比
-├── bindings/pytorch/api.cpp   # 可选的 PyTorch 薄适配层
-├── tests/                     # PyTorch/pytest 正确性测试
-├── setup.py                   # 构建 PyTorch extension
-└── benchmark.py               # 从 Python 调用 kernel 的辅助 benchmark
+src/                         framework-agnostic CUDA kernel/launcher
+include/cuda_learning/       公共接口、CUDA 检查、测试/计时工具
+tests/cpp/                   CMake/CTest 正确性测试
+benchmarks/                  standalone benchmark、NVTX、cuBLAS 对比
+bindings/pytorch/api.cpp     可选 PyTorch 薄封装
+tests/                       pytest 测试
+setup.py                     构建 PyTorch extension
+benchmark.py                 Python benchmark
 ```
 
-核心依赖方向为：
+当前 SGEMM 实现由 `src/sgemm/sgemm.cu` 的 registry 管理，例如：
 
 ```text
-src CUDA kernels
-      |
-      +--> CMake CTest
-      +--> standalone benchmarks --> cuBLAS baseline
-      +--> PyTorch binding --> pytest / Python benchmark
+naive
+shared_memory
+multi_workload
 ```
 
-`src/` 不包含 Torch/c10 头文件。launcher 接受显式 `cudaStream_t`，因此 standalone
-程序和 PyTorch 当前 stream 可以安全复用同一实现。
+## 环境和构建
 
-## 环境
-
-当前本机验证环境：
-
-```text
-Ubuntu 24.04
-Python 3.14.7
-PyTorch 2.13.0+cu130
-CUDA Toolkit 13.3 (/usr/local/cuda)
-RTX 5060 Ti, compute capability 12.0
-CMake 3.28.3
-```
-
-创建 Python 环境并安装 Ninja/pytest：
+需要 CUDA Toolkit、可用 NVIDIA GPU、CMake、Ninja，以及可选的 uv/PyTorch 环境。
+当前机器使用 CUDA 13.3、PyTorch 2.13.0+cu130、RTX 5060 Ti (`sm_120`)。
 
 ```shell
-uv python install 3.14
 uv venv --python 3.14
 source .venv/bin/activate
 uv pip install "torch==2.13.0"
 uv pip install -r requirements.txt
-```
 
-检查工具链和 GPU：
-
-```shell
 cmake --version
-ninja --version
 "${CUDA_HOME:-/usr/local/cuda}/bin/nvcc" --version
 uv run python -c "import torch; print(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))"
 ```
 
-其他 GPU 应把后续命令中的 `120`/`12.0` 替换为实际 compute capability，例如 A100
-使用 CMake architecture `80`，PyTorch 使用 `TORCH_CUDA_ARCH_LIST=8.0`。
+其他 GPU 将下面的 `120` 替换成对应的 CUDA architecture，例如 A100 使用 `80`。
 
-## CMake Standalone 工作流
+项目提供三种 CMake 构建模式：
 
-这是学习 kernel、跑 cuBLAS 对比和使用 NVIDIA 调试工具时的首选入口。它不启动
-Python，也不加载 PyTorch，因此时间线更干净，`cuda-gdb` 断点也更直接。
-
-### 构建模式
-
-| CMake 模式 | CUDA 参数 | 用途 |
+| 模式 | 主要参数 | 用途 |
 | --- | --- | --- |
-| `Release` | `-O3` | 最终性能复测 |
-| `Profile` | `-O3 -lineinfo` | `nsys` / `ncu`，保留优化与源码行信息 |
-| `Debug` | `-O0 -G` | `cuda-gdb` 源码断点和变量检查 |
+| `Debug` | CUDA `-O0 -G` | `cuda-gdb`/VS Code 单步调试 |
+| `Profile` | CUDA `-O3 -lineinfo` | `nsys`/`ncu` 性能分析 |
+| `Release` | CUDA `-O3` | 最终性能复测 |
 
-Profile 构建：
+建议为不同模式使用不同 build 目录：
 
 ```shell
-source .venv/bin/activate
+# 性能分析
 cmake -S . -B build/cmake-profile -G Ninja \
+    -DCMAKE_MAKE_PROGRAM="$PWD/.venv/bin/ninja" \
     -DCMAKE_BUILD_TYPE=Profile \
     -DCMAKE_CUDA_ARCHITECTURES=120
-cmake --build build/cmake-profile -j
-```
+cmake --build build/cmake-profile --clean-first -j
 
-Debug 和 Release 使用独立目录，避免错误复用带 `-G` 的目标文件：
-
-```shell
+# 源码调试
 cmake -S . -B build/cmake-debug -G Ninja \
+    -DCMAKE_MAKE_PROGRAM="$PWD/.venv/bin/ninja" \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CUDA_ARCHITECTURES=120
-cmake --build build/cmake-debug -j
-
-cmake -S . -B build/cmake-release -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CUDA_ARCHITECTURES=120
-cmake --build build/cmake-release -j
+cmake --build build/cmake-debug --clean-first -j
 ```
 
-`Debug/-G` 会改变 device 优化、寄存器分配、occupancy 和耗时，不能用它评价性能。
+`Debug/-G` 会改变寄存器、occupancy 和执行时间，不能用来做性能结论。
 
-### C++ 正确性测试
+## 正确性测试
+
+### CMake/CTest
 
 ```shell
 ctest --test-dir build/cmake-profile --output-on-failure
 
-# 也可以直接运行单个程序
+# 查看实时测试过程、shape 和实现名称
+ctest --test-dir build/cmake-profile \
+    -R '^sgemm$' -V
+
+# 直接运行
 build/cmake-profile/test_square
 build/cmake-profile/test_reduce
 build/cmake-profile/test_sgemm
 ```
 
-SGEMM C++ 测试会自动遍历 registry 中的全部自定义实现，并与 CPU reference 比较。
-新增 SGEMM 版本后不需要为它复制一套测试主程序。
+`test_sgemm` 会打印每个 shape 和 registry 实现，例如：
 
-### Standalone benchmark
+```text
+SGEMM test plan: 10 shapes, 3 registered implementations
+[shape 8/10] M=32, N=32, K=32
+  [impl 1/3] naive ... PASS
+  [impl 2/3] shared_memory ... PASS
+  [impl 3/3] multi_workload ... PASS
+```
+
+当前测试覆盖小矩阵、非方阵、tile 整除和非整除的 M/N/K。新增实现注册后会自动参与
+所有 SGEMM shape 测试。
+
+### PyTorch/pytest
+
+```shell
+CUDA_BUILD_MODE=profile TORCH_CUDA_ARCH_LIST=12.0 \
+uv run python setup.py build_ext --inplace --force
+
+uv run python -m pytest -v -s
+uv run python -m pytest tests/test_sgemm.py -v -s
+```
+
+## Standalone benchmark
 
 ```shell
 build/cmake-profile/benchmark_square \
     --size 1048576 --warmup 10 --iters 100
 
 build/cmake-profile/benchmark_reduce \
-    --impl all --size 1048576 --warmup 10 --iters 100
-
-build/cmake-profile/benchmark_reduce \
     --impl shuffle --size 1048576 --warmup 10 --iters 100
 
 build/cmake-profile/benchmark_sgemm \
-    --impl all --m 1024 --n 1024 --k 1024 --warmup 10 --iters 100
+    --impl all --m 1024 --n 1024 --k 1024 \
+    --warmup 10 --iters 100
 ```
 
 SGEMM 支持：
 
 ```shell
---impl naive     # 当前手写 baseline
---impl cublas    # cuBLAS FP32 baseline
---impl all       # 打印所有已注册手写版本和 cuBLAS
+--impl naive
+--impl shared_memory
+--impl multi_workload
+--impl cublas
+--impl all
 ```
 
-输出同时包含平均时间和 GFLOP/s。程序在计时前会先比较 naive 与 cuBLAS 的结果；完整
-的全部实现/多 shape 正确性由 `test_sgemm` 负责。
+benchmark 会在正式计时前验证每个被选中的实现；错误实现不会输出性能结果。计时使用
+CUDA Event，正式区间不包含输入分配、warmup 和 correctness copy。cuBLAS 使用 row-major
+适配和 `CUBLAS_PEDANTIC_MATH` 作为 FP32 baseline。
 
-cuBLAS 默认使用 column-major。本项目通过计算 `C^T = B^T * A^T` 实现与自定义 kernel
-相同的 row-major `C[M,N] = A[M,K] * B[K,N]`，并使用
-`CUBLAS_PEDANTIC_MATH` 作为严格 FP32 baseline。后续研究 TF32/Tensor Core 时，应新增
-明确命名的 cuBLAS 配置，不要悄悄改变 baseline 的 math mode。
+## CUDA 工具
 
-## NVIDIA 调试与性能分析
+### Compute Sanitizer
 
-| 问题 | 工具 | 构建目录 |
-| --- | --- | --- |
-| CPU/CUDA 时间线、launch 间空洞、同步 | Nsight Systems | `cmake-profile` |
-| 单个 kernel 的吞吐、访存、occupancy、stall | Nsight Compute | `cmake-profile` |
-| `.cu` 断点、CUDA thread、局部变量 | `cuda-gdb` | `cmake-debug` |
-| 越界、race、未初始化访问、同步错误 | Compute Sanitizer | `cmake-debug` 或 `cmake-profile` |
+先查越界和 race，再单步调试：
 
-benchmark 的 `--profile` 会用 `cudaProfilerStart/Stop` 只包住正式计时循环，并写入
-NVTX range。使用 `--profile` 时必须选择一个具体 `--impl`，避免报告混入多个实现。
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/compute-sanitizer" \
+    --tool memcheck \
+    build/cmake-debug/benchmark_sgemm \
+    --impl multi_workload --m 31 --n 29 --k 17 \
+    --warmup 0 --iters 1
+
+"${CUDA_HOME:-/usr/local/cuda}/bin/compute-sanitizer" \
+    --tool racecheck \
+    build/cmake-debug/benchmark_sgemm \
+    --impl multi_workload --m 32 --n 32 --k 32 \
+    --warmup 0 --iters 1
+```
+
+### `cuda-gdb`/VS Code
+
+使用 Debug build，并将输入缩小到一次 launch：
+
+```shell
+CUDA_LAUNCH_BLOCKING=1 \
+"${CUDA_HOME:-/usr/local/cuda}/bin/cuda-gdb" --args \
+build/cmake-debug/benchmark_sgemm \
+--impl multi_workload --m 32 --n 32 --k 32 \
+--warmup 0 --iters 1
+```
+
+进入 `cuda-gdb` 后：
+
+```text
+set breakpoint pending on
+break sgemm_multi_workload
+run
+info cuda kernels
+info cuda threads
+print threadIdx.x
+print threadIdx.y
+print row
+print col
+print tile
+print sum[0][0]
+```
+
+`.vscode/launch.json` 提供 `CUDA: Debug standalone SGEMM` 和 PyTorch 调试配置。前者
+适合调试 kernel；后者只在需要检查 Tensor/stream/binding 时使用。
 
 ### Nsight Systems
+
+`benchmark_sgemm --profile` 使用 `cudaProfilerStart/Stop` 和 NVTX，只捕获正式循环：
 
 ```shell
 mkdir -p reports/sgemm
@@ -192,175 +199,104 @@ mkdir -p reports/sgemm
     --capture-range=cudaProfilerApi \
     --capture-range-end=stop \
     --force-overwrite=true \
-    --output=reports/sgemm/naive-1024 \
+    --output=reports/sgemm/multi-workload \
     build/cmake-profile/benchmark_sgemm \
-    --impl naive --m 1024 --n 1024 --k 1024 \
+    --impl multi_workload --m 1024 --n 1024 --k 1024 \
     --warmup 10 --iters 20 --profile
 
 "${CUDA_HOME:-/usr/local/cuda}/bin/nsys" stats \
-    reports/sgemm/naive-1024.nsys-rep
+    reports/sgemm/multi-workload.nsys-rep
 ```
 
 ### Nsight Compute
 
-`--set full` 会多次重放 kernel，通常只采集一次正式迭代：
+只 profile 一个实现和一次正式迭代：
 
 ```shell
 "${CUDA_HOME:-/usr/local/cuda}/bin/ncu" \
     --profile-from-start=off \
     --set=full \
     --kernel-name-base=demangled \
-    --kernel-name='regex:sgemm_naive_kernel' \
-    --export=reports/sgemm/naive-1024 \
+    --kernel-name='regex:sgemm_multi_workload' \
+    --export=reports/sgemm/multi-workload \
     build/cmake-profile/benchmark_sgemm \
-    --impl naive --m 1024 --n 1024 --k 1024 \
+    --impl multi_workload --m 1024 --n 1024 --k 1024 \
     --warmup 10 --iters 1 --profile
 ```
 
-如果出现 `ERR_NVGPUCTRPERM`，说明普通用户无权访问 GPU performance counters。
-可以临时在绝对路径的 `ncu` 命令前使用 `sudo`，或由管理员按 NVIDIA 驱动安全策略
-开放 counters。Nsight Systems 的普通 CUDA timeline 通常不需要此权限。
+重点看 occupancy、register/shared-memory 使用、global/shared memory throughput、bank
+conflict 和 warp stall。若出现 `ERR_NVGPUCTRPERM`，需要 `sudo` 或管理员开放 GPU
+performance counters；Nsight Systems CUDA timeline 通常不需要该权限。
 
-### cuda-gdb 与 VS Code
+## 新增 SGEMM 版本
 
-```shell
-CUDA_LAUNCH_BLOCKING=1 \
-"${CUDA_HOME:-/usr/local/cuda}/bin/cuda-gdb" --args \
-build/cmake-debug/benchmark_sgemm \
---impl naive --m 128 --n 128 --k 128 --warmup 0 --iters 1
-```
+例如新增 `sgemm_shared_tiled`：
 
-进入调试器后：
+1. 新建 `src/sgemm/sgemm_shared_tiled.cu`，实现 kernel 和 launcher，签名必须匹配：
 
-```text
-set breakpoint pending on
-break sgemm_naive_kernel
-run
-info cuda kernels
-info cuda threads
-print row
-print col
-print sum
-```
+   ```cpp
+   void launch_sgemm_shared_tiled(
+       float* output, const float* a, const float* b,
+       int m, int n, int k, cudaStream_t stream);
+   ```
 
-`.vscode/launch.json` 提供：
+2. 在 `src/sgemm/sgemm.cu` 声明 launcher，并加入 registry：
 
-- `CUDA: Debug standalone SGEMM`：推荐，直接调试 CMake 可执行文件；
-- `CUDA: Debug PyTorch SGEMM`：用于检查 binding、Tensor/stream 集成问题。
+   ```cpp
+   {"shared_tiled", launch_sgemm_shared_tiled},
+   ```
 
-需要安装 NVIDIA Nsight Visual Studio Code Edition，并先完成对应 Debug 构建。
+3. CMake 和 `setup.py` 会自动发现 `src/**/*.cu`，不需要复制 benchmark/main 或手动维护
+   source 列表。
+4. 重新构建后运行：
 
-### Compute Sanitizer
+   ```shell
+   cmake --build build/cmake-profile --clean-first -j
+   build/cmake-profile/test_sgemm
+   build/cmake-profile/benchmark_sgemm \
+       --impl shared_tiled --m 1024 --n 1024 --k 1024 \
+       --warmup 10 --iters 100
+   ```
 
-```shell
-"${CUDA_HOME:-/usr/local/cuda}/bin/compute-sanitizer" --tool memcheck \
-    build/cmake-debug/test_sgemm
+5. 先运行 `compute-sanitizer`，再运行 `nsys/ncu`，最后用 Release 构建做性能复测。
+6. 只有需要 Python 调用时，才在 `bindings/pytorch/api.cpp` 注册 wrapper，并在
+   `tests/test_sgemm.py` 添加 Python API 测试。
 
-"${CUDA_HOME:-/usr/local/cuda}/bin/compute-sanitizer" --tool racecheck \
-    build/cmake-debug/benchmark_reduce \
-    --impl no_bankconflict --size 65536 --warmup 0 --iters 1
-```
-
-## 可选 PyTorch 自定义算子
-
-PyTorch binding 只负责 Tensor 校验、输出分配、取得当前 CUDA stream 和 Python 注册，
-不会复制 kernel。当前 Python API：
-
-```text
-square
-matmul             # sgemm_naive 的兼容别名
-sgemm_naive
-sgemm_baseline     # sgemm_naive 的兼容别名
-reduce_*
-```
-
-构建 profile extension：
-
-```shell
-CUDA_BUILD_MODE=profile TORCH_CUDA_ARCH_LIST=12.0 \
-uv run python setup.py build_ext --inplace --force
-```
-
-`CUDA_BUILD_MODE` 支持：
-
-| 模式 | CUDA 参数 | 用途 |
-| --- | --- | --- |
-| `release` | `-O2` | Python 最终复测 |
-| `profile` | `-O2 --generate-line-info` | 从 Python 入口使用 ncu/nsys |
-| `debug` | `-O0 -g -G` | 调试 PyTorch binding 与 kernel |
-
-运行 Python 测试和辅助 benchmark：
-
-```shell
-uv run python -m pytest -v -s
-uv run python -m pytest tests/test_sgemm.py -v -s
-
-uv run python benchmark.py \
-    --op sgemm_naive --size 1024 --warmup 10 --iters 100
-```
-
-纯 kernel 性能结论应优先使用 standalone benchmark。Python 入口主要用于验证
-PyTorch Tensor、dtype、shape、device、stream 和框架集成语义。
-
-## 新增 SGEMM 优化版本
-
-建议按学习阶段使用明确名称，例如：
-
-```text
-naive
-coalesced
-shared_tiled
-block_tiled_1d
-block_tiled_2d
-vectorized
-double_buffered
-wmma
-```
-
-新增 `shared_tiled` 的最小流程：
-
-1. 新建 `src/sgemm/sgemm_shared_tiled.cu`，实现 kernel 和符合 `SgemmLauncher`
-   签名的 host launcher。CMake 与 `setup.py` 都会自动发现新的 `.cu`。
-2. 在 `src/sgemm/sgemm.cu` 中声明 launcher，并向 `sgemm_implementations()` registry
-   增加一项 `{"shared_tiled", launch_sgemm_shared_tiled}`。
-3. 重新构建后，`test_sgemm` 会自动对新版本运行全部 C++ shape；
-   `benchmark_sgemm --impl all` 和 `--impl shared_tiled` 也会自动可用。
-4. 只有确实需要从 Torch 调用该版本时，才在 `bindings/pytorch/api.cpp` 添加一个薄
-   wrapper/注册项，并在 `tests/test_sgemm.py` 增加该 Python 名称。
-
-因此，一个只用于 CUDA 学习和性能对比的新 SGEMM 版本通常只修改两个位置：新的
-`.cu` 实现文件和一行 registry；不需要复制 `main()`、计时、cuBLAS、参数解析或测试
-框架。
-
-每个版本至少检查：
-
-- 非 tile 整除的 M/N/K；
-- 很小矩阵和非方阵；
-- shared-memory 边界和同步；
-- 向量化 load/store 的对齐与尾部；
-- 与 cuBLAS/CPU reference 的误差；
-- warmup、固定输入、相同 stream/math mode 下的公平计时；
-- `compute-sanitizer`、`nsys`、`ncu` 后再做最终 Release 复测。
+新增 SGEMM 版本必须覆盖：小矩阵、非方阵、M/N/K 非 tile 整除、边界加载/写回、同步、
+shared-memory 和向量化 load/store 的对齐问题。
 
 ## 新增其他算子
 
-1. 在 `src/<op>/` 实现 framework-agnostic kernel/launcher，并把公共接口放到
-   `include/cuda_learning/kernels.h` 或独立 op header。
-2. 添加 `tests/cpp/test_<op>.cu`；若新增独立 target，在 `CMakeLists.txt` 的 test 列表
-   加入 op 名称。
-3. 添加 `benchmarks/benchmark_<op>.cu` 和对应 benchmark target，复用
-   `standalone_utils.h`，不要在每个 kernel 文件中复制 `main()`。
-4. 选择合适 reference：SGEMM 用 cuBLAS，reduce 可用 CPU/CUB，深度学习算子可用
-   cuDNN 或 PyTorch。不是所有算子都适合用 cuBLAS。
-5. 需要 Torch 集成时再添加 binding 和 pytest；纯 CUDA 学习版本不必同步暴露 Python。
+1. 在 `src/<op>/` 添加 framework-agnostic kernel/launcher。
+2. 在 `include/cuda_learning/kernels.h` 或独立 header 声明公共接口。
+3. 添加 `tests/cpp/test_<op>.cu`，使用 CPU/CUB/cuBLAS/PyTorch 等合适 reference。
+4. 添加 `benchmarks/benchmark_<op>.cu`；复用 `standalone_utils.h`，不要复制测试框架。
+5. 在 `CMakeLists.txt` 添加 test/benchmark target（SGEMM registry 版本不需要新增 target）。
+6. 需要 Python 集成时再添加 binding、pytest 和 `benchmark.py` 入口。
 
-推荐顺序：CTest 正确性 -> Compute Sanitizer -> Nsight Systems -> Nsight Compute ->
-Release benchmark -> 可选 PyTorch 集成。
+推荐顺序：
 
-## 构建提示
+```text
+CTest/reference correctness
+    -> Compute Sanitizer
+    -> cuda-gdb（需要时）
+    -> Nsight Systems
+    -> Nsight Compute
+    -> Release 性能复测
+    -> 可选 PyTorch 集成
+```
 
-- `build/`、`.so`、profiler 原始报告和 `reports/` 默认不会提交到 Git。
-- 当前 CUDA Toolkit 13.3 与 PyTorch cu130 存在 minor-version mismatch 警告；本机
-  CMake、extension、CTest、pytest 和 CUDA 运行均已验证通过。
-- 切换 CMake build type 使用不同 build 目录；切换 `CUDA_BUILD_MODE` 时为 extension
-  加 `--force`，避免加载旧目标文件。
+## 常见注意事项
+
+- `Debug/-G`、`CUDA_LAUNCH_BLOCKING=1`、sanitizer、cuda-gdb 的耗时都不能用于性能结论。
+- CMake kernel 源文件由 `cuda_kernels` 统一编译；不要再把同一个 `.cu` 手动加入 benchmark
+  executable，否则会产生 `multiple definition`。
+- 修改源文件或 registry 后，如果出现 `ninja: no work to do` 但 binary 没有新实现，使用：
+
+  ```shell
+  cmake --build build/cmake-profile --clean-first -j
+  ```
+
+- 普通用户运行 `ncu` 可能遇到 `ERR_NVGPUCTRPERM`。
+- 当前 CUDA Toolkit 13.3 与 PyTorch cu130 存在 minor-version mismatch 警告；本机 CMake、
+  CTest、PyTorch extension 和 pytest 均已验证通过。

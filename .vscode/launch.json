@@ -7,12 +7,18 @@
             "request": "launch",
             "program": "${workspaceFolder}/build/cmake-debug/benchmark_sgemm",
             "args": [
-                "--impl", "naive",
-                "--m", "128",
-                "--n", "128",
-                "--k", "128",
-                "--warmup", "0",
-                "--iters", "1"
+                "--impl",
+                "multi_workload",
+                "--m",
+                "32",
+                "--n",
+                "32",
+                "--k",
+                "32",
+                "--warmup",
+                "0",
+                "--iters",
+                "1"
             ],
             "cwd": "${workspaceFolder}"
         },
@@ -23,10 +29,14 @@
             "program": "${workspaceFolder}/.venv/bin/python",
             "args": [
                 "${workspaceFolder}/benchmark.py",
-                "--op", "sgemm_naive",
-                "--size", "128",
-                "--warmup", "0",
-                "--iters", "1"
+                "--op",
+                "sgemm_naive",
+                "--size",
+                "128",
+                "--warmup",
+                "0",
+                "--iters",
+                "1"
             ],
             "cwd": "${workspaceFolder}",
             "environment": [
