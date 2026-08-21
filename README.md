@@ -43,11 +43,11 @@ uv run python -c "import torch; print(torch.cuda.get_device_name(0), torch.cuda.
 
 项目提供三种 CMake 构建模式：
 
-| 模式 | 主要参数 | 用途 |
-| --- | --- | --- |
-| `Debug` | CUDA `-O0 -G` | `cuda-gdb`/VS Code 单步调试 |
-| `Profile` | CUDA `-O3 -lineinfo` | `nsys`/`ncu` 性能分析 |
-| `Release` | CUDA `-O3` | 最终性能复测 |
+| 模式      | 主要参数             | 用途                        |
+| --------- | -------------------- | --------------------------- |
+| `Debug`   | CUDA `-O0 -G`        | `cuda-gdb`/VS Code 单步调试 |
+| `Profile` | CUDA `-O3 -lineinfo` | `nsys`/`ncu` 性能分析       |
+| `Release` | CUDA `-O3`           | 最终性能复测                |
 
 建议为不同模式使用不同 build 目录：
 
@@ -251,11 +251,23 @@ performance counters；Nsight Systems CUDA timeline 通常不需要该权限。
 4. 重新构建后运行：
 
    ```shell
-   cmake --build build/cmake-profile --clean-first -j
-   build/cmake-profile/test_sgemm
-   build/cmake-profile/benchmark_sgemm \
-       --impl shared_tiled --m 1024 --n 1024 --k 1024 \
-       --warmup 10 --iters 100
+   # debug 
+    cmake --build build/cmake-debug --target benchmark_sgemm -j 4
+
+    compute-sanitizer --tool memcheck \
+    build/cmake-debug/benchmark_sgemm \
+    --impl float4 \
+    --m 16 --n 16 --k 16 \
+    --warmup 0 --iters 1
+
+    # profile
+    cmake --build build/cmake-profile --clean-first -j
+
+    build/cmake-profile/test_sgemm
+    
+    build/cmake-profile/benchmark_sgemm \
+        --impl shared_tiled --m 1024 --n 1024 --k 1024 \
+        --warmup 10 --iters 100
    ```
 
 5. 先运行 `compute-sanitizer`，再运行 `nsys/ncu`，最后用 Release 构建做性能复测。
