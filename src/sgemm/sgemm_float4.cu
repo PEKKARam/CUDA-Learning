@@ -83,11 +83,13 @@ __global__ void sgemm_float4(float *__restrict__ C, const float *__restrict__ A,
 
         // ---------- 计算：每线程 16 个 FMA / 8 次 smem 读 ----------
         // 外积累加法：列×行 变成一个部分和矩阵，然后逐次累加
+        // a_frag:(TM 行, 1 列float), b_vec: (1 行， 4 列float)
 #pragma unroll
-        for (int k = 0; k < BK; ++k) { // BK 层的和
+        for (int k = 0; k < BK; ++k) { // 分块中 BK 层的和
             float a_frag[TM];          // 4 次读，跨 tx 广播
 #pragma unroll
             for (int r = 0; r < TM; ++r) { a_frag[r] = a_smem[ty * TM + r][k]; }
+
             const float4 b_vec
                 = *reinterpret_cast<const float4 *>(&b_smem[k][tx * TN]);
 #pragma unroll
