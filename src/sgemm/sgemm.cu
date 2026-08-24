@@ -45,6 +45,13 @@ void launch_sgemm_multi_workload(float *output, const float *A, const float *B,
 void launch_sgemm_float4(float *output, const float *A, const float *B, int M,
                          int N, int K, cudaStream_t stream);
 
+void launch_sgemm_double_buffers(float *output, const float *A, const float *B,
+                                 int M, int N, int K, cudaStream_t stream);
+
+void launch_sgemm_register_double_buffers(float *output, const float *A,
+                                          const float *B, int M, int N, int K,
+                                          cudaStream_t stream);
+
 // sgemm public implementations
 const std::vector<SgemmImplementation> &sgemm_implementations() {
     static const std::vector<SgemmImplementation> implementations = {
@@ -52,6 +59,8 @@ const std::vector<SgemmImplementation> &sgemm_implementations() {
         {"shared_memory", launch_sgemm_shared_memory},
         {"multi_workload", launch_sgemm_multi_workload},
         {"float4", launch_sgemm_float4},
+        {"double_buffers", launch_sgemm_double_buffers},
+        {"register_double_buffers", launch_sgemm_register_double_buffers},
     };
     return implementations;
 }

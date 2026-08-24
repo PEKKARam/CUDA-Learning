@@ -86,7 +86,7 @@ __global__ void sgemm_float4(float *__restrict__ C, const float *__restrict__ A,
         // a_frag:(TM 行, 1 列float), b_vec: (1 行， 4 列float)
 #pragma unroll
         for (int k = 0; k < BK; ++k) { // 分块中 BK 层的和
-            float a_frag[TM];          // 4 次读，跨 tx 广播
+            float a_frag[TM];          // 4 次读，跨 tx，存放转置
 #pragma unroll
             for (int r = 0; r < TM; ++r) { a_frag[r] = a_smem[ty * TM + r][k]; }
 
