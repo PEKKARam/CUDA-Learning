@@ -228,6 +228,252 @@ mkdir -p reports/sgemm
 conflict 和 warp stall。若出现 `ERR_NVGPUCTRPERM`，需要 `sudo` 或管理员开放 GPU
 performance counters；Nsight Systems CUDA timeline 通常不需要该权限。
 
+## Nsight 学习路线（先照做，不要一次看完所有面板）
+
+Nsight Systems（`nsys`）和 Nsight Compute（`ncu`）解决的是两类不同问题：
+
+```text
+nsys  -> 这一段程序的时间花在哪里？kernel 是否串行？是否被 memcpy/CPU 空转拖慢？
+ncu   -> 某一个 kernel 为什么慢？线程、内存、occupancy、stall 的瓶颈是什么？
+```
+
+建议固定使用下面的顺序：
+
+```text
+正确性测试 -> Compute Sanitizer -> nsys 时间线 -> ncu 单 kernel 指标 -> Release 复测
+```
+
+不要用 `Debug/-G`、`CUDA_LAUNCH_BLOCKING=1`、Compute Sanitizer 或 cuda-gdb 的时间
+作为性能结论；这些工具会改变 kernel 的执行速度。
+
+### 第一步：准备 Profile 构建
+
+`Profile` 模式保留优化，同时加入源码行号，适合 nsys/ncu；`Debug` 模式带 `-G`，只
+适合定位错误和 cuda-gdb 单步。每次切换模式使用不同 build 目录，避免旧 object 混用：
+
+```shell
+cmake -S . -B build/cmake-profile -G Ninja \
+    -DCMAKE_MAKE_PROGRAM="$PWD/.venv/bin/ninja" \
+    -DCMAKE_BUILD_TYPE=Profile \
+    -DCMAKE_CUDA_ARCHITECTURES=120
+cmake --build build/cmake-profile --clean-first -j
+```
+
+确认目标 GPU 架构：
+
+```shell
+uv run python -c \
+    "import torch; print(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))"
+```
+
+RTX 5060 Ti 使用 `120`；其他 GPU 将 `120` 换成对应的 compute capability。
+
+### 第二步：先用 Compute Sanitizer 排错
+
+只使用一个实现、一个小输入和一次迭代，错误信息最容易对应到源码：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/compute-sanitizer" \
+    --tool memcheck \
+    build/cmake-debug/benchmark_reduce \
+    --impl shuffle --size 1003 --warmup 0 --iters 1
+```
+
+SGEMM：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/compute-sanitizer" \
+    --tool memcheck \
+    build/cmake-debug/benchmark_sgemm \
+    --impl multi_workload --m 31 --n 29 --k 17 \
+    --warmup 0 --iters 1
+```
+
+`memcheck` 主要查越界和非法地址，`racecheck` 主要查 shared memory/data race：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/compute-sanitizer" \
+    --tool racecheck \
+    build/cmake-debug/benchmark_reduce \
+    --impl shuffle --size 1003 --warmup 0 --iters 1
+```
+
+如果 sanitizer 报错，先修 kernel，不要继续看性能指标。若使用 PyTorch benchmark，
+可以加 `CUDA_LAUNCH_BLOCKING=1` 让错误更接近触发位置，但它只用于调试：
+
+```shell
+CUDA_LAUNCH_BLOCKING=1 uv run python benchmark.py \
+    --op reduce_shuffle --size 1003 --warmup 0 --iters 1
+```
+
+### 第三步：用 nsys 看完整时间线
+
+先 profile 一个 reduce 实现：
+
+```shell
+mkdir -p reports/reduce reports/sgemm
+"${CUDA_HOME:-/usr/local/cuda}/bin/nsys" profile \
+    --trace=cuda,nvtx,osrt \
+    --capture-range=cudaProfilerApi \
+    --capture-range-end=stop \
+    --force-overwrite=true \
+    --output=reports/reduce/shuffle \
+    build/cmake-profile/benchmark_reduce \
+    --impl shuffle --size 1048576 --warmup 10 --iters 20 --profile
+```
+
+再 profile 一个 SGEMM 实现：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/nsys" profile \
+    --trace=cuda,nvtx,osrt \
+    --capture-range=cudaProfilerApi \
+    --capture-range-end=stop \
+    --force-overwrite=true \
+    --output=reports/sgemm/multi-workload \
+    build/cmake-profile/benchmark_sgemm \
+    --impl multi_workload --m 1024 --n 1024 --k 1024 \
+    --warmup 10 --iters 20 --profile
+```
+
+查看命令行统计：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/nsys" stats \
+    reports/reduce/shuffle.nsys-rep
+```
+
+查看 GUI：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/nsys-ui" \
+    reports/sgemm/multi-workload.nsys-rep
+```
+
+第一次只看三件事：
+
+1. CUDA API 是否在等待 CPU 或 memcpy。
+2. kernel launch 之间是否有不必要的空洞（gap）。
+3. 同一个 kernel 的执行时间是否稳定，warmup 是否被排除。
+
+不要先研究所有 CPU sampling、OS runtime 和 CUDA API 选项；当前 benchmark 已通过
+`cudaProfilerStart/Stop` 和 NVTX 把正式循环标出来。
+
+### 第四步：用 ncu 看单个 kernel
+
+`ncu` 一次只分析一个实现和一个 kernel。先使用少量指标，不要一开始使用 full set：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/ncu" \
+    --profile-from-start=off \
+    --section ComputeWorkloadAnalysis \
+    --section MemoryWorkloadAnalysis \
+    --section SpeedOfLight \
+    --kernel-name-base=demangled \
+    --kernel-name='regex:reduce_shuffle' \
+    --launch-skip 10 \
+    --launch-count 1 \
+    --export=reports/reduce/shuffle \
+    build/cmake-profile/benchmark_reduce \
+    --impl shuffle --size 1048576 --warmup 10 --iters 1 --profile
+```
+
+SGEMM 只替换 kernel 过滤条件和程序参数：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/ncu" \
+    --profile-from-start=off \
+    --set=full \
+    --kernel-name-base=demangled \
+    --kernel-name='regex:sgemm_multi_workload' \
+    --launch-skip 10 --launch-count 1 \
+    --export=reports/sgemm/multi-workload \
+    build/cmake-profile/benchmark_sgemm \
+    --impl multi_workload --m 1024 --n 1024 --k 1024 \
+    --warmup 10 --iters 1 --profile
+```
+
+查看 GUI：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/ncu-ui" \
+    reports/reduce/shuffle.ncu-rep
+```
+
+打开 ncu 报表后按以下顺序看：
+
+| 顺序 | 位置/指标 | 先问的问题 |
+| --- | --- | --- |
+| 1 | Launch Statistics | grid/block 是否是预期？register、shared memory 是否过大？ |
+| 2 | Occupancy | 是否因为 register/shared memory 限制了 active warps？ |
+| 3 | Speed of Light | Compute、DRAM、L2 哪一个接近瓶颈？ |
+| 4 | Memory Workload | 是否有低效的 global load、低带宽或 bank conflict？ |
+| 5 | Warp State Statistics | warp stall 主要来自 memory、barrier 还是执行依赖？ |
+
+如果普通用户执行 ncu 出现 `ERR_NVGPUCTRPERM`，这是驱动性能计数器权限问题，不是
+kernel 或命令参数错误。使用管理员允许的方式运行：
+
+```shell
+sudo "${CUDA_HOME:-/usr/local/cuda}/bin/ncu" ...
+```
+
+`nsys` 通常不需要该权限；不要为了消除 ncu 权限错误修改 kernel。
+
+### nsys 和 ncu 的结果如何串起来
+
+以 SGEMM 为例：
+
+```text
+nsys 发现 kernel 占总时间 95%，且没有 memcpy 空洞
+  -> ncu 查看该 kernel 是 memory-bound 还是 compute-bound
+  -> 若 DRAM throughput 高、SM busy 低：优化 global/shared memory 访问
+  -> 若 occupancy 低：检查 register、shared memory、block size
+  -> 若 barrier stall 高：检查 __syncthreads、tile pipeline、同步粒度
+  -> 修改后重新跑 sanitizer、nsys、ncu，再用 Release benchmark 复测
+```
+
+reduce 通常重点看 memory throughput、atomic serialization 和 warp stall；SGEMM 通常
+重点看 tensor/core 使用（如果适用）、global/shared memory throughput、occupancy、
+register pressure、bank conflict 和 math pipeline 利用率。
+
+## 新增算子/新版本时的固定清单
+
+以后新增反量化、reduce 或 SGEMM 版本时，不需要修改 nsys/ncu 本身，但需要保证下面的
+入口都同步：
+
+1. **kernel/launcher**：在 `src/<op>/*.cu` 定义 kernel 和 launcher；launcher 使用
+   PyTorch current stream 或公共 `cudaStream_t stream`，并执行 kernel launch check。
+2. **公共接口/registry**：在 `include/cuda_learning/kernels.h` 声明接口；SGEMM 或
+   reduce 版本加入 `src/<op>` 的 registry，保证 `--impl <name>` 能选到它。
+3. **CMake 自动发现**：本项目会自动发现 `src/**/*.cu`，通常不需要手动复制 source；
+   但新增 benchmark/test target 时要更新 `CMakeLists.txt`。
+4. **正确性测试**：在 `tests/cpp/test_<op>.cu` 添加 reference 对比，覆盖小尺寸、非
+   整除尺寸、空/边界输入；需要 Python 时再同步 `tests/test_<op>.py`。
+5. **benchmark 入口**：优先复用现有 `benchmarks/benchmark_<op>.cu` 的 `--impl`，不要
+   为每个版本复制一个 benchmark。只有参数模型不同才扩展 CLI。
+6. **profile kernel 名**：先用 `ncu --kernels` 或 nsys timeline 确认真实 kernel 名，
+   再写 `--kernel-name='regex:<name>'`；不要猜名字。
+7. **NVTX/profile range**：让 benchmark 的正式迭代包在 `cudaProfilerStart/Stop` 和
+   NVTX range 内，否则 nsys/ncu 会把初始化和 warmup 混进结果。
+8. **构建模式**：修改 `.cu` 后分别重建 `build/cmake-debug` 和 `build/cmake-profile`；
+   PyTorch binding 则使用 `CUDA_BUILD_MODE=profile ... setup.py ... --force`。
+9. **验证顺序**：先 CTest/pytest，再 Compute Sanitizer，再 nsys，再 ncu，最后 Release
+   benchmark。任何 sanitizer 错误未修复前不要比较性能。
+
+反量化项目建议直接复制这套目录边界：
+
+```text
+src/dequant/                 kernel、不同实现和 launcher
+include/cuda_learning/       公共接口/registry
+tests/cpp/test_dequant.cu    correctness reference
+benchmarks/benchmark_dequant.cu  warmup、CUDA Event、NVTX、profile range
+```
+
+第一版反量化只做一个明确 baseline（例如 scalar FP32 accumulation），然后依次增加
+向量化 load、shared-memory staging、融合 scale/zero-point、不同 block mapping。每次
+只改变一个因素，并用同一组 shape、同一套 nsys/ncu 命令比较；这样当前项目就能作为
+反量化项目的实验基线，而不是只停留在“能运行”的样例集合。
+
 ## 新增 SGEMM 版本
 
 例如新增 `sgemm_shared_tiled`：
