@@ -29,6 +29,10 @@ enum class ReduceImplementation {
 void launch_square(float* output, const float* input, std::size_t n,
                    cudaStream_t stream);
 
+// Row-major output[M, N] is the transpose of input[N, M].
+void launch_transpose_naive(const float* input, float* output, std::size_t n,
+                            std::size_t m, cudaStream_t stream);
+
 // Row-major C[M, N] = A[M, K] * B[K, N].
 void launch_sgemm(std::string_view implementation, float* output,
                   const float* a, const float* b, int m, int n, int k,

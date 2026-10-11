@@ -7,10 +7,10 @@
 
 namespace cuda_learning {
 
-template <const int STRIDE>
+template <const int STRIDE, const int BM, const int BN, const int BK>
 __global__ void sgemm_multi_workload(float *output, const float *A,
                                      const float *B, int M, int N, int K) {
-    constexpr int BM = 16, BN = 16, BK = 16;
+
     constexpr int STEP = BK * STRIDE; // tiling processing step length
     __shared__ float a_shared[BM * STRIDE][STEP];
     __shared__ float b_shared[STEP][BN * STRIDE];
@@ -85,14 +85,15 @@ void launch_sgemm_multi_workload(float *output, const float *A, const float *B,
         return;
     }
 
-    constexpr int STRIDE = 2;
-    constexpr dim3 BLOCK_SIZE(16, 16);
+    constexpr int BM = 16, BN = 16, BK = 16;
+    constexpr int STRIDE = 4;
+    constexpr dim3 BLOCK_SIZE(BN, BM);
     constexpr int OUTPUT_TILE = BLOCK_SIZE.x * STRIDE;
     // block数量减成原来的四分之一，每个线程处理4倍数据
     const dim3 GRID_SIZE((N + OUTPUT_TILE - 1) / OUTPUT_TILE,
                          (M + OUTPUT_TILE - 1) / OUTPUT_TILE);
 
-    sgemm_multi_workload<STRIDE>
+    sgemm_multi_workload<STRIDE, BM, BN, BK>
         <<<GRID_SIZE, BLOCK_SIZE, 0, stream>>>(output, A, B, M, N, K);
 }
 

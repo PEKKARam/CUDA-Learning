@@ -114,10 +114,14 @@ uv run python -m pytest tests/test_sgemm.py -v -s
 ```shell
 build/cmake-profile/benchmark_square \
     --size 1048576 --warmup 10 --iters 100
+```
 
+```shell
 build/cmake-profile/benchmark_reduce \
     --impl shuffle --size 1048576 --warmup 10 --iters 100
+```
 
+```shell
 build/cmake-profile/benchmark_sgemm \
     --impl all --m 1024 --n 1024 --k 1024 \
     --warmup 10 --iters 100
@@ -402,13 +406,13 @@ SGEMM 只替换 kernel 过滤条件和程序参数：
 
 打开 ncu 报表后按以下顺序看：
 
-| 顺序 | 位置/指标 | 先问的问题 |
-| --- | --- | --- |
-| 1 | Launch Statistics | grid/block 是否是预期？register、shared memory 是否过大？ |
-| 2 | Occupancy | 是否因为 register/shared memory 限制了 active warps？ |
-| 3 | Speed of Light | Compute、DRAM、L2 哪一个接近瓶颈？ |
-| 4 | Memory Workload | 是否有低效的 global load、低带宽或 bank conflict？ |
-| 5 | Warp State Statistics | warp stall 主要来自 memory、barrier 还是执行依赖？ |
+| 顺序 | 位置/指标             | 先问的问题                                                |
+| ---- | --------------------- | --------------------------------------------------------- |
+| 1    | Launch Statistics     | grid/block 是否是预期？register、shared memory 是否过大？ |
+| 2    | Occupancy             | 是否因为 register/shared memory 限制了 active warps？     |
+| 3    | Speed of Light        | Compute、DRAM、L2 哪一个接近瓶颈？                        |
+| 4    | Memory Workload       | 是否有低效的 global load、低带宽或 bank conflict？        |
+| 5    | Warp State Statistics | warp stall 主要来自 memory、barrier 还是执行依赖？        |
 
 如果普通用户执行 ncu 出现 `ERR_NVGPUCTRPERM`，这是驱动性能计数器权限问题，不是
 kernel 或命令参数错误。使用管理员允许的方式运行：
