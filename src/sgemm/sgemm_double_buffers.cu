@@ -11,23 +11,29 @@ namespace {
 template <int BM, int BK, int PAD>
 __device__ __forceinline__ void
 loadA_to_buffer(const float *__restrict__ A, int M, int K,
-                float (*a_smem)[BM][BK + PAD], int load_idx, int ga_r, int ga_c,
-                int a_lr, int a_lk, const bool aligned) {
-
-    if (aligned && ga_r < M && ga_c + 7 < K) { // 快路径：纯 float4
-        const float4 v0 = *reinterpret_cast<const float4 *>(
-            A + (std::size_t)ga_r * K + ga_c);
-        const float4 v1 = *reinterpret_cast<const float4 *>(
-            A + (std::size_t)ga_r * K + ga_c + 4);
-        *reinterpret_cast<float4 *>(&a_smem[load_idx][a_lr][a_lk]) = v0;
-        *reinterpret_cast<float4 *>(&a_smem[load_idx][a_lr][a_lk + 4]) = v1;
-    } else { // 慢路径：只有边缘 tile 走
+                float (*a_smem)[BM][BK + PAD], int load_idx, int tid,
+                int tile_k, const bool aligned) {
+    // 与 float4_v2 一致：每轮相邻线程加载相邻的 float4。
 #pragma unroll
-        for (int v = 0; v < 8; ++v) {
-            a_smem[load_idx][a_lr][a_lk + v]
-                = (ga_r < M && ga_c + v < K)
-                    ? A[(std::size_t)ga_r * K + ga_c + v]
-                    : 0.0f;
+    for (int half = 0; half < 2; ++half) {
+        const int a_i = tid * 4 + half * (BM * BK / 2);
+        const int a_lr = a_i / BK;
+        const int a_lk = a_i % BK;
+        const int ga_r = blockIdx.y * BM + a_lr;
+        const int ga_c = tile_k + a_lk;
+
+        if (aligned && ga_r < M && ga_c + 3 < K) {
+            const float4 v = *reinterpret_cast<const float4 *>(
+                A + static_cast<std::size_t>(ga_r) * K + ga_c);
+            *reinterpret_cast<float4 *>(&a_smem[load_idx][a_lr][a_lk]) = v;
+        } else {
+#pragma unroll
+            for (int v = 0; v < 4; ++v) {
+                a_smem[load_idx][a_lr][a_lk + v]
+                    = (ga_r < M && ga_c + v < K)
+                        ? A[static_cast<std::size_t>(ga_r) * K + ga_c + v]
+                        : 0.0f;
+            }
         }
     }
 }
@@ -35,23 +41,28 @@ loadA_to_buffer(const float *__restrict__ A, int M, int K,
 template <int BK, int BN, int PAD>
 __device__ __forceinline__ void
 loadB_to_buffer(const float *__restrict__ B, int N, int K,
-                float (*b_smem)[BK][BN + PAD], int load_idx, int gb_r, int gb_c,
-                int b_lk, int b_lc, const bool aligned) {
-
-    if (aligned && gb_r < K && gb_c + 7 < N) {
-        const float4 v0 = *reinterpret_cast<const float4 *>(
-            B + (std::size_t)gb_r * N + gb_c);
-        const float4 v1 = *reinterpret_cast<const float4 *>(
-            B + (std::size_t)gb_r * N + gb_c + 4);
-        *reinterpret_cast<float4 *>(&b_smem[load_idx][b_lk][b_lc]) = v0;
-        *reinterpret_cast<float4 *>(&b_smem[load_idx][b_lk][b_lc + 4]) = v1;
-    } else {
+                float (*b_smem)[BK][BN + PAD], int load_idx, int tid,
+                int tile_k, const bool aligned) {
 #pragma unroll
-        for (int v = 0; v < 8; ++v) {
-            b_smem[load_idx][b_lk][b_lc + v]
-                = (gb_r < K && gb_c + v < N)
-                    ? B[(std::size_t)gb_r * N + gb_c + v]
-                    : 0.0f;
+    for (int half = 0; half < 2; ++half) {
+        const int b_i = tid * 4 + half * (BK * BN / 2);
+        const int b_lk = b_i / BN;
+        const int b_lc = b_i % BN;
+        const int gb_r = tile_k + b_lk;
+        const int gb_c = blockIdx.x * BN + b_lc;
+
+        if (aligned && gb_r < K && gb_c + 3 < N) {
+            const float4 v = *reinterpret_cast<const float4 *>(
+                B + static_cast<std::size_t>(gb_r) * N + gb_c);
+            *reinterpret_cast<float4 *>(&b_smem[load_idx][b_lk][b_lc]) = v;
+        } else {
+#pragma unroll
+            for (int v = 0; v < 4; ++v) {
+                b_smem[load_idx][b_lk][b_lc + v]
+                    = (gb_r < K && gb_c + v < N)
+                        ? B[static_cast<std::size_t>(gb_r) * N + gb_c + v]
+                        : 0.0f;
+            }
         }
     }
 }
@@ -61,6 +72,9 @@ __global__ void
 sgemm_double_buffers(float *__restrict__ C, const float *__restrict__ A,
                      const float *__restrict__ B, int M, int N, int K) {
     constexpr int PAD = 4;
+    constexpr int THREADS = (BM / TM) * (BN / TN);
+    static_assert(BM * BK == THREADS * 8 && BK * BN == THREADS * 8,
+                  "Each thread must load two float4 vectors per tile.");
 
     __shared__ float a_smem[2][BM][BK + PAD];
     __shared__ float b_smem[2][BK][BN + PAD];
@@ -75,30 +89,14 @@ sgemm_double_buffers(float *__restrict__ C, const float *__restrict__ A,
 
     float sum[TM][TN] = {0.0f}; // accelarators of each thread
 
-    // 每线程负责搬运 8 个 float，跨8个bank（两个 float4) load_row/load_col
-    // A矩阵 BK / 8 = 4: 一行4个线程，每个线程搬运8个float
-    const int a_lr = tid / (BK / 8);       // A tile 的行 0..BM-1
-    const int a_lk = (tid % (BK / 8)) * 8; // A tile 的列 0,8,16,24
-
-    // B矩阵 BN / 8 = 8： 一行八个线程，每个线程搬运8个float
-    const int b_lk = tid / (BN / 8);       // B tile 的行 0..BK-1
-    const int b_lc = (tid % (BN / 8)) * 8; // B tile 的列 0..BN-8
-
-    const bool aligned = (K % 4 == 0) && (N % 4 == 0); // 循环不变量，只判一次
+    const bool a_aligned = (K % 4 == 0);
+    const bool b_aligned = (N % 4 == 0);
 
     // ---------- 预加载 A 子块 [BM, BK] ----------
-    const int ga_r = blockIdx.y * BM + a_lr;
-    const int ga_c = a_lk;
-
-    loadA_to_buffer<BM, BK, PAD>(A, M, K, a_smem, 0, ga_r, ga_c, a_lr, a_lk,
-                            aligned);
+    loadA_to_buffer<BM, BK, PAD>(A, M, K, a_smem, 0, tid, 0, a_aligned);
 
     // ---------- 预加载 B 子块 [BK, BN] ----------
-    const int gb_r = b_lk;
-    const int gb_c = blockIdx.x * BN + b_lc;
-
-    loadB_to_buffer<BK, BN, PAD>(B, N, K, b_smem, 0, gb_r, gb_c, b_lk, b_lc,
-                            aligned);
+    loadB_to_buffer<BK, BN, PAD>(B, N, K, b_smem, 0, tid, 0, b_aligned);
 
     // 所有线程必须先完成首个 tile 的加载，才能开始读取 shared memory。
     __syncthreads();
@@ -137,10 +135,10 @@ sgemm_double_buffers(float *__restrict__ C, const float *__restrict__ A,
         if (tile_k + 1 < num_tiles) {
             // 下一个 tile 的全局 K 偏移必须随 tile 改变。
             const int next_tile_k = (tile_k + 1) * BK;
-            loadA_to_buffer<BM, BK, PAD>(A, M, K, a_smem, next, ga_r,
-                                    next_tile_k + a_lk, a_lr, a_lk, aligned);
-            loadB_to_buffer<BK, BN, PAD>(B, N, K, b_smem, next, next_tile_k + b_lk,
-                                    gb_c, b_lk, b_lc, aligned);
+            loadA_to_buffer<BM, BK, PAD>(A, M, K, a_smem, next, tid,
+                                        next_tile_k, a_aligned);
+            loadB_to_buffer<BK, BN, PAD>(B, N, K, b_smem, next, tid,
+                                        next_tile_k, b_aligned);
         }
         __syncthreads();
 
@@ -155,7 +153,7 @@ sgemm_double_buffers(float *__restrict__ C, const float *__restrict__ A,
         if (row >= M) {
             break;
         }
-        if (aligned && col0 + TN <= N) {
+        if (b_aligned && col0 + TN <= N) {
             *reinterpret_cast<float4 *>(C + (std::size_t)row * N + col0)
                 = make_float4(sum[r][0], sum[r][1], sum[r][2], sum[r][3]);
         } else {

@@ -46,7 +46,7 @@ target_compile_options(cuda_kernels PRIVATE -lineinfo)
 if(CUDA_LEARNING_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name IN ITEMS square reduce transpose sgemm)
+    foreach(test_name IN ITEMS square reduce transpose sgemm sgemm_swizzle)
         add_executable(test_${test_name} tests/cpp/test_${test_name}.cu)
         target_link_libraries(test_${test_name} PRIVATE cuda_kernels)
         add_test(NAME ${test_name} COMMAND test_${test_name})

@@ -127,15 +127,106 @@ build/cmake-profile/benchmark_sgemm \
     --warmup 10 --iters 100
 ```
 
-SGEMM 支持：
+当前启用 swizzle 基线、三个计算 K 循环展开实验、三种 global 提前加载实验、双 fragment 和完整 tile 特化实验，其他 SGEMM 实现仍在
+`src/sgemm/sgemm.cu` 的 registry 中注释。每个版本各有独立的 `.cu` 文件和 kernel 名称，方便在 NCU UI 中区分。
+`float4_v3_swizzle_unroll8/4/1` 现均使用 AB 提前加载，分别只改变计算 K 循环的
+`#pragma unroll` 参数为 8、4、1；其中 1 表示禁止展开这个 K 循环。
+它们的对照是 `float4_v3_swizzle_preload_ab`（AB 提前加载、展开 32），不是普通
+`float4_v3_swizzle`。原有实现名称保留，行方向 FMA 等其他循环的展开方式保持一致。
+`test_sgemm` 自动验证这九个实现，`benchmark_sgemm --impl all` 输出九组结果和 cuBLAS。
+
+`float4_v3_swizzle_preload_a` 保持基线的展开次数 32、B 加载和 shared 读取方式。
+在两个 A 向量都完整且对齐时，先发出当前 tile 的 A0/A1 global float4 load，再写入
+shared；边界和非对齐情况使用基线的加载与补零规则。此版本不跨 tile 预取。
+`float4_v3_swizzle_preload_b` 只将 B0/B1 两次加载提前到各自 shared 写入之前，
+`float4_v3_swizzle_preload_ab` 将 A0/A1/B0/B1 四次加载全部提前到 shared 写入之前。
+两者同样保留基线的计算与边界处理，不引入跨 tile 双缓冲。
+
+`float4_v3_swizzle_preload_ab_frag2` 以 `preload_ab` 的展开 32 为对照，保留 AB global
+提前加载，并在计算阶段使用两组 A/B float4 fragment：预加载 k=0，随后先发出 k+1 的
+shared load，再执行 k 的 16 次 FMA。最后一个 k 不加载下一组；shared 容量、同步和
+边界补零规则保持不变。源码预取顺序最终是否保留，需要结合 SASS 检查。
+
+`float4_v3_swizzle_preload_ab_frag2_fulltile` 在 host 判断
+`(M % 64 == 0) && (N % 64 == 0) && (K % 32 == 0)`，选择同一 kernel 的
+`FULL_TILE=true/false` 特化。`true` 使用 `if constexpr` 删除所有输入/输出边界与
+对齐检查、标量加载/写回和补零路径；`false` 保留通用路径。AB 预加载、双 fragment、
+展开 32 和同步方式不变。NCU 中可通过最后一个模板参数 true/false 区分这两个特化。
 
 ```shell
---impl naive
---impl shared_memory
---impl multi_workload
+--impl float4_v3_swizzle
+--impl float4_v3_swizzle_unroll8
+--impl float4_v3_swizzle_unroll4
+--impl float4_v3_swizzle_unroll1
+--impl float4_v3_swizzle_preload_a
+--impl float4_v3_swizzle_preload_b
+--impl float4_v3_swizzle_preload_ab
+--impl float4_v3_swizzle_preload_ab_frag2
+--impl float4_v3_swizzle_preload_ab_frag2_fulltile
 --impl cublas
 --impl all
 ```
+
+只比较基线和三种预加载版本（正式对比时多轮轮换运行顺序）：
+
+```shell
+for impl in float4_v3_swizzle float4_v3_swizzle_preload_a \
+            float4_v3_swizzle_preload_b float4_v3_swizzle_preload_ab; do
+    build/cmake-profile/benchmark_sgemm \
+        --impl "$impl" --m 1024 --n 1024 --k 1024 --warmup 30 --iters 300
+done
+```
+
+五轮预加载对比的原始耗时与结论见 [预加载实验记录](src/sgemm/sgemm_preload_comparison.md)。
+
+验证“减少展开是否为提前加载腾出寄存器预算”时比较下面四个 AB 版本：
+
+```shell
+for impl in float4_v3_swizzle_preload_ab float4_v3_swizzle_unroll8 \
+            float4_v3_swizzle_unroll4 float4_v3_swizzle_unroll1; do
+    build/cmake-profile/benchmark_sgemm \
+        --impl "$impl" --m 1024 --n 1024 --k 1024 --warmup 30 --iters 300
+done
+```
+
+AB 提前加载下的寄存器数、五轮耗时与结论见 [AB 展开实验记录](src/sgemm/sgemm_preload_ab_unroll_comparison.md)。
+
+对比相同展开 32 下的双 fragment 计算预取（[实验记录](src/sgemm/sgemm_preload_ab_frag2_comparison.md)）：
+
+```shell
+for impl in float4_v3_swizzle_preload_ab float4_v3_swizzle_preload_ab_frag2; do
+    build/cmake-profile/benchmark_sgemm \
+        --impl "$impl" --m 1024 --n 1024 --k 1024 --warmup 30 --iters 300
+done
+```
+
+完整 tile 特化测试（[编译核查与实验记录](src/sgemm/sgemm_fulltile_comparison.md)）：
+
+```shell
+build/cmake-profile/benchmark_sgemm \
+    --impl float4_v3_swizzle_preload_ab_frag2_fulltile \
+    --m 1024 --n 1024 --k 1024 --warmup 30 --iters 300
+```
+
+构建、验证和单独测试展开次数 8：
+
+```shell
+cmake --build build/cmake-profile --target test_sgemm benchmark_sgemm -j 4
+build/cmake-profile/test_sgemm
+build/cmake-profile/benchmark_sgemm \
+    --impl float4_v3_swizzle_unroll8 --m 1024 --n 1024 --k 1024 \
+    --warmup 20 --iters 200
+```
+
+查看最终 benchmark 二进制中各独立命名 kernel 的寄存器与资源用量：
+
+```shell
+"${CUDA_HOME:-/usr/local/cuda}/bin/cuobjdump" --dump-resource-usage \
+    build/cmake-profile/benchmark_sgemm | c++filt
+```
+
+本文后面的旧版 SGEMM 工具示例若使用其他实现，请将 `--impl` 改为
+`float4_v3_swizzle`，kernel 过滤条件相应改为 `regex:sgemm_float4_v3_swizzle`。
 
 benchmark 会在正式计时前验证每个被选中的实现；错误实现不会输出性能结果。计时使用
 CUDA Event，正式区间不包含输入分配、warmup 和 correctness copy。cuBLAS 使用 row-major

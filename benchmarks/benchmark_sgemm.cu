@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
         cuda_learning::random_floats(static_cast<std::size_t>(k) * n, 2);
     cuda_learning::DeviceBuffer<float> device_a(a.size());
     cuda_learning::DeviceBuffer<float> device_b(b.size());
-    cuda_learning::DeviceBuffer<float> device_naive(
+    cuda_learning::DeviceBuffer<float> device_output(
         static_cast<std::size_t>(m) * n);
     cuda_learning::DeviceBuffer<float> device_cublas(
         static_cast<std::size_t>(m) * n);
@@ -75,19 +75,12 @@ int main(int argc, char** argv) {
     CUBLAS_CHECK(cublasCreate(&handle));
     CUBLAS_CHECK(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH));
 
-    cuda_learning::launch_sgemm("naive", device_naive.data(), device_a.data(),
-                                device_b.data(), m, n, k, nullptr);
+    // cuBLAS provides the reference; no disabled implementation is launched.
     launch_cublas_sgemm(handle, device_cublas.data(), device_a.data(),
                         device_b.data(), m, n, k);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     const auto reference = device_cublas.copy_to_host();
-    if (!cuda_learning::check_vectors(device_naive.copy_to_host(), reference,
-                                      1e-2F, 1e-3F)) {
-        std::cerr << "naive SGEMM does not match cuBLAS" << std::endl;
-        CUBLAS_CHECK(cublasDestroy(handle));
-        return EXIT_FAILURE;
-    }
 
     const double operations = 2.0 * static_cast<double>(m) * n * k;
     auto report = [&](const std::string& name, float milliseconds) {
@@ -105,11 +98,11 @@ int main(int argc, char** argv) {
 
         // Validate this implementation outside the timed region. The
         // benchmark should never report performance for an incorrect kernel.
-        selected.launch(device_naive.data(), device_a.data(), device_b.data(),
+        selected.launch(device_output.data(), device_a.data(), device_b.data(),
                         m, n, k, nullptr);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
-        if (!cuda_learning::check_vectors(device_naive.copy_to_host(),
+        if (!cuda_learning::check_vectors(device_output.copy_to_host(),
                                           reference, 1e-2F, 1e-3F)) {
             std::cerr << "SGEMM " << name << " failed correctness for M=" << m
                       << ", N=" << n << ", K=" << k << std::endl;
@@ -119,7 +112,7 @@ int main(int argc, char** argv) {
 
         const float milliseconds = cuda_learning::benchmark_ms(
             "sgemm_" + name, warmup, iterations, profile, [&] {
-                selected.launch(device_naive.data(), device_a.data(),
+                selected.launch(device_output.data(), device_a.data(),
                                 device_b.data(), m, n, k, nullptr);
             });
         report(name, milliseconds);

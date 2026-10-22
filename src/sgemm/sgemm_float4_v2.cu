@@ -11,30 +11,23 @@ template <int BM, int BN, int BK, int TM, int TN>
 __global__ void
 sgemm_float4_v2(float *__restrict__ C, const float *__restrict__ A,
                 const float *__restrict__ B, int M, int N, int K) {
-    // coaleased version
+    // Global 合并读取，A 在写入 shared memory 时转置。
     constexpr int PAD = 4;
 
-    constexpr int A_TILE_SIZE = BM * BK;
-    constexpr int B_TILE_SIZE = BK * BN;
+    constexpr int A_HALF_TILE = BM * BK / 2;
+    constexpr int B_HALF_TILE = BK * BN / 2;
 
-    constexpr int A_HALF_TILE = A_TILE_SIZE / 2;
-    constexpr int B_HALF_TILE = B_TILE_SIZE / 2;
+    constexpr int THREADS = (BM / TM) * (BN / TN);
+    static_assert(BM * BK == THREADS * 8 && BK * BN == THREADS * 8,
+                  "Each thread must load two float4 vectors per tile.");
+    static_assert(BK % 4 == 0 && BN % 4 == 0,
+                  "Global float4 loads must stay within tile rows.");
+    static_assert((BM + PAD) % 4 == 0 && (BN + PAD) % 4 == 0,
+                  "Shared-memory rows must preserve float4 alignment.");
+    static_assert(TM == 4 && TN == 4, "This implementation assumes TM=TN=4.");
 
-    // 本版本的加载映射针对 BM=64, BN=64, BK=32,
-    // 每个 block 使用 256 个线程，每个线程加载两个 float4。
-    // static_assert(BM * BK == THREADS * 8,
-    //               "A tile must contain 8 floats per thread.");
-    // static_assert(BK * BN == THREADS * 8,
-    //               "B tile must contain 8 floats per thread.");
-    // static_assert(BK % 4 == 0 && BN % 4 == 0,
-    //               "BK and BN must be divisible by 4.");
-    // static_assert((BK + PAD) % 4 == 0 && (BN + PAD) % 4 == 0,
-    //               "Shared-memory strides must preserve float4 alignment.");
-    // static_assert(TM == 4 && TN == 4, "This implementation assumes
-    // TM=TN=4.");
-
-    // PAD=4：保留你之前的 shared-memory padding。
-    __shared__ float a_smem[BM][BK + PAD];
+    // A: [row][k] -> [k][row]；固定 k 时，四个输出行对应的 A 连续。
+    __shared__ float a_smem[BK][BM + PAD];
     __shared__ float b_smem[BK][BN + PAD];
 
     const int tx = threadIdx.x;
@@ -103,7 +96,7 @@ sgemm_float4_v2(float *__restrict__ C, const float *__restrict__ A,
     for (int tile_k = 0; tile_k < K; tile_k += BK) {
 
         // --------------------------------------------------------
-        // A: global memory -> shared memory
+        // A: global 按 K 维连续读取，shared 转置写入 [k][row]。
         // --------------------------------------------------------
 
         // 第一个 float4
@@ -115,13 +108,16 @@ sgemm_float4_v2(float *__restrict__ C, const float *__restrict__ A,
             const float4 v = *reinterpret_cast<const float4 *>(
                 A + static_cast<std::size_t>(ga_row0) * K + ga_col0);
 
-            *reinterpret_cast<float4 *>(&a_smem[a_row0][a_col0]) = v;
+            a_smem[a_col0][a_row0] = v.x;
+            a_smem[a_col0 + 1][a_row0] = v.y;
+            a_smem[a_col0 + 2][a_row0] = v.z;
+            a_smem[a_col0 + 3][a_row0] = v.w;
 
         } else {
 // 边界处理：越界元素填 0。
 #pragma unroll
             for (int v = 0; v < 4; ++v) {
-                a_smem[a_row0][a_col0 + v]
+                a_smem[a_col0 + v][a_row0]
                     = (ga_row0 < M && ga_col0 + v < K)
                         ? A[static_cast<std::size_t>(ga_row0) * K + ga_col0 + v]
                         : 0.0f;
@@ -137,12 +133,15 @@ sgemm_float4_v2(float *__restrict__ C, const float *__restrict__ A,
             const float4 v = *reinterpret_cast<const float4 *>(
                 A + static_cast<std::size_t>(ga_row1) * K + ga_col1);
 
-            *reinterpret_cast<float4 *>(&a_smem[a_row1][a_col1]) = v;
+            a_smem[a_col1][a_row1] = v.x;
+            a_smem[a_col1 + 1][a_row1] = v.y;
+            a_smem[a_col1 + 2][a_row1] = v.z;
+            a_smem[a_col1 + 3][a_row1] = v.w;
 
         } else {
 #pragma unroll
             for (int v = 0; v < 4; ++v) {
-                a_smem[a_row1][a_col1 + v]
+                a_smem[a_col1 + v][a_row1]
                     = (ga_row1 < M && ga_col1 + v < K)
                         ? A[static_cast<std::size_t>(ga_row1) * K + ga_col1 + v]
                         : 0.0f;
@@ -199,18 +198,15 @@ sgemm_float4_v2(float *__restrict__ C, const float *__restrict__ A,
         __syncthreads();
 
         // --------------------------------------------------------
-        // 3. Compute：保持原来的寄存器分块和 FMA 计算
+        // 3. Compute：A/B 都沿 shared memory 行连续读取 float4。
         // --------------------------------------------------------
 
 #pragma unroll
         for (int k = 0; k < BK; ++k) {
 
-            float a_frag[TM];
-
-#pragma unroll
-            for (int r = 0; r < TM; ++r) {
-                a_frag[r] = a_smem[ty * TM + r][k];
-            }
+            const float4 a_vec
+                = *reinterpret_cast<const float4 *>(&a_smem[k][ty * TM]);
+            const float a_frag[TM] = {a_vec.x, a_vec.y, a_vec.z, a_vec.w};
 
             // 每个线程读取 B 的连续 4 个 float。
             // TN=4，tx*TN 为 4 的倍数；
