@@ -9,6 +9,8 @@
 int main() {
     const std::vector<std::tuple<int, int, int>> shapes = {
         // Complete tiles, each individual tail dimension, unaligned strides, K=0.
+        {64, 128, 16}, {128, 128, 16}, {128, 128, 32},
+        {65, 128, 16}, {128, 129, 16}, {128, 128, 17},
         {64, 64, 32}, {128, 64, 64}, {65, 64, 32}, {64, 65, 32},
         {64, 64, 33}, {1, 1, 1}, {31, 29, 17}, {65, 68, 36},
         {68, 65, 35}, {127, 132, 65}, {64, 64, 0},
@@ -17,14 +19,15 @@ int main() {
         {1024, 1024, 1024},
         {2048, 2048, 2048},
     };
-    // The unroll8/4/1 entries now all preload AB; preload_ab is their unroll32 control.
-    const std::vector<std::string_view> names
-        = {"float4_v3_swizzle", "float4_v3_swizzle_unroll8",
-           "float4_v3_swizzle_unroll4", "float4_v3_swizzle_unroll1",
-           "float4_v3_swizzle_preload_a", "float4_v3_swizzle_preload_b",
-           "float4_v3_swizzle_preload_ab",
-           "float4_v3_swizzle_preload_ab_frag2",
-           "float4_v3_swizzle_preload_ab_frag2_fulltile"};
+    // Same four implementations as the active SGEMM registry.
+    const std::vector<std::string_view> names = {
+        "float4_v3_swizzle", "float4_v3_swizzle_preload_ab_frag2_fulltile",
+        "float4_v3_swizzle_fulltile_rt4x8", "float4_v3_swizzle_fulltile_rt8x8",
+        // "float4_v3_swizzle_unroll8", "float4_v3_swizzle_unroll4",
+        // "float4_v3_swizzle_unroll1", "float4_v3_swizzle_preload_a",
+        // "float4_v3_swizzle_preload_b", "float4_v3_swizzle_preload_ab",
+        // "float4_v3_swizzle_preload_ab_frag2",
+    };
 
     for (const auto &[m, n, k] : shapes) {
         const auto a

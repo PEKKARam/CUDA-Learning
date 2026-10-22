@@ -127,13 +127,39 @@ build/cmake-profile/benchmark_sgemm \
     --warmup 10 --iters 100
 ```
 
-当前启用 swizzle 基线、三个计算 K 循环展开实验、三种 global 提前加载实验、双 fragment 和完整 tile 特化实验，其他 SGEMM 实现仍在
-`src/sgemm/sgemm.cu` 的 registry 中注释。每个版本各有独立的 `.cu` 文件和 kernel 名称，方便在 NCU UI 中区分。
-`float4_v3_swizzle_unroll8/4/1` 现均使用 AB 提前加载，分别只改变计算 K 循环的
-`#pragma unroll` 参数为 8、4、1；其中 1 表示禁止展开这个 K 循环。
-它们的对照是 `float4_v3_swizzle_preload_ab`（AB 提前加载、展开 32），不是普通
-`float4_v3_swizzle`。原有实现名称保留，行方向 FMA 等其他循环的展开方式保持一致。
-`test_sgemm` 自动验证这九个实现，`benchmark_sgemm --impl all` 输出九组结果和 cuBLAS。
+当前只启用以下四个 SGEMM 实现；过去的 unroll、preload A/B/AB 和非 fulltile fragment
+实验已在 `src/sgemm/sgemm.cu` 的 registry 及 `test_sgemm_swizzle` 实现列表中注释。
+`test_sgemm` 根据 registry 自动测试，`benchmark_sgemm --impl all` 输出这四个实现和 cuBLAS。
+
+| 实现 | 每线程 register tile | BM×BN×BK | 线程数 | 静态 shared |
+|---|---|---|---|---|
+| `float4_v3_swizzle` | 4×4 | 64×64×32 | 256 | 16 KiB |
+| `float4_v3_swizzle_preload_ab_frag2_fulltile` | 4×4 | 64×64×32 | 256 | 16 KiB |
+| `float4_v3_swizzle_fulltile_rt4x8` | 4×8 | 64×128×16 | 256 | 12 KiB |
+| `float4_v3_swizzle_fulltile_rt8x8` | 8×8 | 128×128×16 | 256 | 16 KiB |
+
+新版本继承完整 tile 编译期分支、当前 tile 的 AB global 预加载和两组计算 fragment。
+8 列拆成相距 64 列的两个连续 float4；8 行同样拆成相距 64 行的两组。
+因此每线程覆盖的输出不是一个相邻 8 列/8 行矩形，而是两个或四个 4×4 小块，
+以维持 warp 访存映射。BK=16 时 A 的 shared 物理行使用
+`row ^ ((k >> 2) << 3)`，与旧 BK=32 的 swizzle 不同。
+协作加载次数从 tile 大小推导，不再固定每线程两个 float4。
+
+```shell
+cmake --build build/cmake-profile --target test_sgemm_swizzle benchmark_sgemm -j 4
+build/cmake-profile/test_sgemm_swizzle
+build/cmake-profile/benchmark_sgemm \
+    --impl all --m 1024 --n 1024 --k 1024 --warmup 30 --iters 300
+```
+
+单独采集新版本时使用 `--impl float4_v3_swizzle_fulltile_rt4x8` 或
+`--impl float4_v3_swizzle_fulltile_rt8x8`，NCU 中也有同名的独立 kernel。
+每个新版本按自身 BM/BN/BK 判断 `FULL_TILE=true/false`；非整除尺寸保留补零和边界写回。
+
+寄存器/资源统计、bank 映射说明、NCU 核查和五轮性能数据见
+[Register tile 实验记录](src/sgemm/sgemm_register_tile_comparison.md)。
+
+以下为历史实验说明与命令；被注释的实现需先恢复 registry 才能运行。
 
 `float4_v3_swizzle_preload_a` 保持基线的展开次数 32、B 加载和 shared 读取方式。
 在两个 A 向量都完整且对齐时，先发出当前 tile 的 A0/A1 global float4 load，再写入
@@ -155,14 +181,9 @@ shared load，再执行 k 的 16 次 FMA。最后一个 k 不加载下一组；s
 
 ```shell
 --impl float4_v3_swizzle
---impl float4_v3_swizzle_unroll8
---impl float4_v3_swizzle_unroll4
---impl float4_v3_swizzle_unroll1
---impl float4_v3_swizzle_preload_a
---impl float4_v3_swizzle_preload_b
---impl float4_v3_swizzle_preload_ab
---impl float4_v3_swizzle_preload_ab_frag2
 --impl float4_v3_swizzle_preload_ab_frag2_fulltile
+--impl float4_v3_swizzle_fulltile_rt4x8
+--impl float4_v3_swizzle_fulltile_rt8x8
 --impl cublas
 --impl all
 ```

@@ -91,26 +91,35 @@ void launch_sgemm_float4_v3_swizzle_preload_ab_frag2_fulltile(
     float *output, const float *A, const float *B,
     int M, int N, int K, cudaStream_t stream);
 
+void launch_sgemm_float4_v3_swizzle_fulltile_rt4x8(
+    float *output, const float *A, const float *B,
+    int M, int N, int K, cudaStream_t stream);
+
+void launch_sgemm_float4_v3_swizzle_fulltile_rt8x8(
+    float *output, const float *A, const float *B,
+    int M, int N, int K, cudaStream_t stream);
+
 // sgemm public implementations
 const std::vector<SgemmImplementation> &sgemm_implementations() {
     static const std::vector<SgemmImplementation> implementations = {
-        // unroll8/4/1 均提前加载 AB；preload_ab 是展开 32 的对照。
+        // Focus on the swizzle baseline and fulltile register-tile experiments.
         // {"naive", launch_sgemm_naive},
         // {"shared_memory", launch_sgemm_shared_memory},
         // {"multi_workload", launch_sgemm_multi_workload},
         // {"float4", launch_sgemm_float4},
         // {"float4_v2", launch_sgemm_float4_v2},
         {"float4_v3_swizzle", launch_sgemm_float4_v3_swizzle},
-        {"float4_v3_swizzle_preload_a", launch_sgemm_float4_v3_swizzle_preload_a},
-        {"float4_v3_swizzle_preload_b", launch_sgemm_float4_v3_swizzle_preload_b},
-        {"float4_v3_swizzle_preload_ab", launch_sgemm_float4_v3_swizzle_preload_ab},
-        {"float4_v3_swizzle_preload_ab_frag2",
-         launch_sgemm_float4_v3_swizzle_preload_ab_frag2},
         {"float4_v3_swizzle_preload_ab_frag2_fulltile",
          launch_sgemm_float4_v3_swizzle_preload_ab_frag2_fulltile},
-        {"float4_v3_swizzle_unroll8", launch_sgemm_float4_v3_swizzle_unroll8},
-        {"float4_v3_swizzle_unroll4", launch_sgemm_float4_v3_swizzle_unroll4},
-        {"float4_v3_swizzle_unroll1", launch_sgemm_float4_v3_swizzle_unroll1},
+        {"float4_v3_swizzle_fulltile_rt4x8", launch_sgemm_float4_v3_swizzle_fulltile_rt4x8},
+        {"float4_v3_swizzle_fulltile_rt8x8", launch_sgemm_float4_v3_swizzle_fulltile_rt8x8},
+        // {"float4_v3_swizzle_preload_a", launch_sgemm_float4_v3_swizzle_preload_a},
+        // {"float4_v3_swizzle_preload_b", launch_sgemm_float4_v3_swizzle_preload_b},
+        // {"float4_v3_swizzle_preload_ab", launch_sgemm_float4_v3_swizzle_preload_ab},
+        // {"float4_v3_swizzle_preload_ab_frag2", launch_sgemm_float4_v3_swizzle_preload_ab_frag2},
+        // {"float4_v3_swizzle_unroll8", launch_sgemm_float4_v3_swizzle_unroll8},
+        // {"float4_v3_swizzle_unroll4", launch_sgemm_float4_v3_swizzle_unroll4},
+        // {"float4_v3_swizzle_unroll1", launch_sgemm_float4_v3_swizzle_unroll1},
         // {"double_buffers", launch_sgemm_double_buffers},
         // {"register_double_buffers", launch_sgemm_register_double_buffers},
     };
